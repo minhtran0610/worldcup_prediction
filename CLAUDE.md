@@ -195,3 +195,17 @@ worldcup-model/
 ## 12. Responsible note
 
 This is a research/learning project. Gambling carries real financial risk, models rarely beat the market net of margin, and any staking output is illustrative. Keep stakes hypothetical unless you fully understand the risk.
+
+---
+
+## 13. Decisions made (June 2026)
+
+- **Score grid:** 0–7 each axis, renormalize grid to sum to 1 for truncation
+- **Distribution:** independent Poisson + Dixon-Coles τ correction (not true bivariate Poisson) for v1
+- **Form encoder:** GRU for v1 (Transformer deferred — no benefit at N~10 sequence length)
+- **Sparsity strategy:** internationals-only for Phase 1; club pretrain deferred to Phase 2 neural net
+- **Data layer:** pandas (soccerdata compatibility; polars deferred)
+- **Backtest targets:** WC 2018, WC 2022, Euros 2020/2024
+- **Scope:** Elo + Dixon-Coles baselines fully evaluated before any DL
+- **Environment:** bare metal conda on RTX server (not Docker)
+- **Timing:** WC 2026 group stage is live — Phase 1 targets mid-group-stage delivery; Phase 2 targets knockout rounds

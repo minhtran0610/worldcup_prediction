@@ -1,0 +1,21 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: ruff lint
+        language: system
+        entry: ruff check --fix
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        language: system
+        entry: ruff format
+        types: [python]
+
+      - id: ty
+        name: ty type check
+        language: system
+        entry: ty check
+        types: [python]
+        pass_filenames: false

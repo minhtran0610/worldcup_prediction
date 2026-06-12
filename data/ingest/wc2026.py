@@ -29,7 +29,7 @@ TEAM_NAME_MAP: dict[str, str] = {
     # Misc
     "Türkiye": "Turkey",
     "Turkiye": "Turkey",
-    "Bosnia and Herzegovina": "Bosnia-Herzegovina",
+    "Bosnia and Herzegovina": "Bosnia and Herzegovina",  # keep as-is (matches Kaggle CSV)
     "Czechia": "Czech Republic",
     "North Macedonia": "North Macedonia",
 }
@@ -87,12 +87,13 @@ def _parse_score(raw: str) -> tuple[int | None, int | None]:
 def _scrape_wikipedia() -> pd.DataFrame:
     """Fetch the WC 2026 Wikipedia page and extract the group stage schedule.
 
-    Wikipedia's WC pages use a consistent pattern: each group has a table
-    with columns roughly like:
-        Date | Home team | Score | Away team | Venue | ...
+    The 2026 WC Wikipedia page uses individual (1×3) tables per match where
+    the *column names* encode the data:
+        col[0] = home team name
+        col[1] = score like "2–1" (completed) or "Match N" (upcoming)
+        col[2] = away team name
 
-    We scan all tables returned by pd.read_html for ones that contain
-    both a score-like column and recognisable team columns.
+    Falls back to the legacy column-name strategy for older page layouts.
 
     Returns a DataFrame with _EMPTY_COLUMNS schema, or raises on failure.
     """
@@ -107,15 +108,110 @@ def _scrape_wikipedia() -> pd.DataFrame:
 
     tables = pd.read_html(StringIO(resp.text), flavor="html5lib")
 
-    rows: list[dict] = []
+    rows = _scrape_match_tables(tables)
 
-    # Heuristic: WC group-stage match tables on Wikipedia have these features:
-    #   - A column whose values look like "N–M" (score) or "–" (upcoming)
-    #   - Two team-name columns adjacent to the score column
-    #   - A date column
-    #
-    # The exact column names vary across Wikipedia article versions.
-    # We try multiple known column-name conventions.
+    if not rows:
+        # Legacy fallback: column-name matching strategy
+        rows = _scrape_legacy_columns(tables)
+
+    if not rows:
+        # Last-resort positional fallback
+        rows = _scrape_fallback(tables)
+
+    if not rows:
+        raise ValueError(
+            "No group stage match rows found on the Wikipedia page. "
+            "The page structure may have changed."
+        )
+
+    df = pd.DataFrame(rows, columns=_EMPTY_COLUMNS)
+    df["date"] = pd.to_datetime(df["date"], utc=False, errors="coerce")
+    df["is_completed"] = df["is_completed"].astype(bool)
+    return df
+
+
+# Placeholder team names used in knockout brackets — skip these rows
+_KNOCKOUT_PLACEHOLDERS = frozenset(
+    [
+        "winner",
+        "runner-up",
+        "runner up",
+        "3rd",
+        "third",
+        "loser",
+        "tbd",
+        "to be determined",
+    ]
+)
+
+
+def _is_placeholder(name: str) -> bool:
+    lower = name.lower()
+    return any(p in lower for p in _KNOCKOUT_PLACEHOLDERS)
+
+
+def _scrape_match_tables(tables: list[pd.DataFrame]) -> list[dict]:
+    """Parse the 2026-era Wikipedia layout where each match is a (1×3) table.
+
+    The column *names* hold: col[0]=home, col[1]=score-or-match-id, col[2]=away.
+    """
+    rows: list[dict] = []
+    score_re = re.compile(r"^\d+\s*[–\-]\s*\d+$")
+    match_re = re.compile(r"^Match\s+\d+$", re.IGNORECASE)
+
+    for tbl in tables:
+        if tbl.shape != (1, 3):
+            continue
+        if isinstance(tbl.columns, pd.MultiIndex):
+            cols = [" ".join(str(c) for c in col).strip() for col in tbl.columns]
+        else:
+            cols = [str(c).strip() for c in tbl.columns]
+
+        home_raw, mid, away_raw = cols[0], cols[1], cols[2]
+
+        # mid must be a score or a match placeholder
+        is_score = bool(score_re.match(mid))
+        is_match_id = bool(match_re.match(mid))
+        if not (is_score or is_match_id):
+            continue
+
+        # Skip placeholder bracket entries (e.g. "Winner Group A")
+        if _is_placeholder(home_raw) or _is_placeholder(away_raw):
+            continue
+
+        # Skip if teams look like garbage (very long strings = not a team name)
+        if len(home_raw) > 60 or len(away_raw) > 60:
+            continue
+
+        home = _normalise_team(home_raw)
+        away = _normalise_team(away_raw)
+
+        if is_score:
+            home_score, away_score = _parse_score(mid)
+            is_completed = home_score is not None
+        else:
+            home_score, away_score = None, None
+            is_completed = False
+
+        rows.append(
+            {
+                "date": pd.NaT,
+                "home_team": home,
+                "away_team": away,
+                "home_score": home_score,
+                "away_score": away_score,
+                "stage": "Group",
+                "venue": "",
+                "is_completed": is_completed,
+            }
+        )
+
+    return rows
+
+
+def _scrape_legacy_columns(tables: list[pd.DataFrame]) -> list[dict]:
+    """Legacy strategy: scan tables for named Home/Away/Score columns."""
+    rows: list[dict] = []
 
     SCORE_ALIASES = {"Score", "score", "Result", "result", "Res.", "FT"}
     HOME_ALIASES = {"Home team", "Home", "Team 1", "home_team"}
@@ -125,7 +221,6 @@ def _scrape_wikipedia() -> pd.DataFrame:
     STAGE_ALIASES = {"Group", "Stage", "Round", "Group stage"}
 
     for tbl in tables:
-        # Flatten multi-level columns if present
         if isinstance(tbl.columns, pd.MultiIndex):
             tbl.columns = [" ".join(str(c) for c in col).strip() for col in tbl.columns]
 
@@ -136,7 +231,6 @@ def _scrape_wikipedia() -> pd.DataFrame:
         venue_col = next((c for c in tbl.columns if c in VENUE_ALIASES), None)
         stage_col = next((c for c in tbl.columns if c in STAGE_ALIASES), None)
 
-        # Skip tables that don't look like match schedules
         if not (score_col and home_col and away_col):
             continue
 
@@ -145,17 +239,14 @@ def _scrape_wikipedia() -> pd.DataFrame:
             away_raw = str(row.get(away_col, "")).strip()
             score_raw = str(row.get(score_col, "")).strip()
 
-            # Skip header-like rows or empty rows
             if not home_raw or not away_raw or home_raw.lower() in {"nan", "home team", "home"}:
                 continue
 
             home = _normalise_team(home_raw)
             away = _normalise_team(away_raw)
-
             home_score, away_score = _parse_score(score_raw)
             is_completed = home_score is not None
 
-            # Date parsing: try multiple formats
             date_raw = str(row.get(date_col, "")) if date_col else ""
             date_raw = re.sub(r"\[.*?\]", "", date_raw).strip()
             parsed_date: pd.Timestamp | None = None
@@ -176,7 +267,6 @@ def _scrape_wikipedia() -> pd.DataFrame:
 
             venue = str(row.get(venue_col, "")).strip() if venue_col else ""
             venue = re.sub(r"\[.*?\]", "", venue).strip()
-
             stage = str(row.get(stage_col, "")).strip() if stage_col else "Group"
             stage = re.sub(r"\[.*?\]", "", stage).strip()
             if not stage or stage.lower() == "nan":
@@ -195,21 +285,7 @@ def _scrape_wikipedia() -> pd.DataFrame:
                 }
             )
 
-    if not rows:
-        # Fallback: try a second parsing strategy targeting tables where the
-        # score is embedded in a single "match" column or unnamed columns.
-        rows = _scrape_fallback(tables)
-
-    if not rows:
-        raise ValueError(
-            "No group stage match rows found on the Wikipedia page. "
-            "The page structure may have changed."
-        )
-
-    df = pd.DataFrame(rows, columns=_EMPTY_COLUMNS)
-    df["date"] = pd.to_datetime(df["date"], utc=False, errors="coerce")
-    df["is_completed"] = df["is_completed"].astype(bool)
-    return df
+    return rows
 
 
 def _scrape_fallback(tables: list[pd.DataFrame]) -> list[dict]:

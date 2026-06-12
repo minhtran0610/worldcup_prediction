@@ -26,6 +26,7 @@ dependencies = [
 predict = "cli.predict:app"
 backtest = "cli.backtest:app"
 export = "cli.export:app"
+train = "cli.train:app"
 
 [tool.setuptools.packages.find]
 where = ["."]

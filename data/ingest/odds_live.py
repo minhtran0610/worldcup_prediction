@@ -142,6 +142,22 @@ def fetch_upcoming_odds(
     return results
 
 
+def _normalise_odds_name(name: str) -> str:
+    """Normalise a team name for fuzzy matching across data sources.
+
+    Removes punctuation, replaces '&' with 'and', collapses whitespace.
+    e.g. "Bosnia & Herzegovina" and "Bosnia and Herzegovina" both become
+    "bosnia and herzegovina".
+    """
+    import re as _re
+
+    name = name.lower()
+    name = name.replace("&", "and")
+    name = _re.sub(r"[^\w\s]", "", name)  # strip punctuation
+    name = _re.sub(r"\s+", " ", name).strip()
+    return name
+
+
 def fetch_odds_for_teams(
     home_team: str,
     away_team: str,
@@ -149,18 +165,19 @@ def fetch_odds_for_teams(
 ) -> dict[str, float] | None:
     """Return {"odds_home": float, "odds_draw": float, "odds_away": float} for a specific match.
 
-    Searches upcoming matches for the given team pair (case-insensitive).
+    Searches upcoming matches for the given team pair using normalised name matching
+    (handles differences like 'Bosnia & Herzegovina' vs 'Bosnia and Herzegovina').
     Returns None if match not found or API key not set.
     """
     matches = fetch_upcoming_odds(api_key=api_key)
 
-    home_lower = home_team.lower()
-    away_lower = away_team.lower()
+    home_norm = _normalise_odds_name(home_team)
+    away_norm = _normalise_odds_name(away_team)
 
     for match in matches:
         if (
-            match.get("home_team", "").lower() == home_lower
-            and match.get("away_team", "").lower() == away_lower
+            _normalise_odds_name(match.get("home_team", "")) == home_norm
+            and _normalise_odds_name(match.get("away_team", "")) == away_norm
         ):
             return {
                 "odds_home": match["odds_home"],

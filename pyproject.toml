@@ -27,6 +27,7 @@ predict = "cli.predict:app"
 backtest = "cli.backtest:app"
 export = "cli.export:app"
 train = "cli.train:app"
+wc2026 = "cli.wc2026:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -43,6 +44,7 @@ ignore = ["E501", "B008", "B904"]
 [tool.ty.rules]
 unresolved-attribute = "ignore"
 invalid-argument-type = "warn"
+invalid-assignment = "warn"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

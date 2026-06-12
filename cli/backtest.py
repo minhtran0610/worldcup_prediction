@@ -10,6 +10,7 @@ from features.context import derive_context
 from features.elo import compute_elo_ratings
 from models.dixon_coles import DixonColesModel
 from models.elo_model import EloModel
+from models.ensemble import EnsembleModel
 from models.neural import NeuralModel
 from models.xgb_model import XGBModel
 
@@ -19,7 +20,7 @@ app = typer.Typer()
 @app.command()
 def main(
     csv_path: Path | None = typer.Option(None, help="Path to Kaggle results CSV"),
-    model: str = typer.Option("dc", help="Model: 'dc', 'elo', 'xgb', or 'neural'"),
+    model: str = typer.Option("dc", help="Model: 'dc', 'elo', 'xgb', 'neural', or 'ensemble'"),
     min_train_months: int = typer.Option(36, help="Minimum training months before first fold"),
     val_months: int = typer.Option(6, help="Validation window length in months"),
     tournament_filter: str | None = typer.Option(None, help="Filter to a specific tournament name"),
@@ -91,9 +92,19 @@ def main(
             predictions = pred_batch[["prob_home", "prob_draw", "prob_away"]].copy()
             grids = list(pred_batch["grid"])
 
+        elif model == "ensemble":
+            dc = DixonColesModel()
+            dc.fit(train_df)
+            xgb = XGBModel()
+            xgb.fit(train_df)
+            ensemble = EnsembleModel(models=[dc, xgb])
+            pred_batch = ensemble.predict_batch(val_df)
+            predictions = pred_batch[["prob_home", "prob_draw", "prob_away"]].copy()
+            grids = list(pred_batch["grid"])
+
         else:
             typer.echo(
-                f"Error: unknown model {model!r}. Use 'dc', 'elo', 'xgb', or 'neural'.",
+                f"Error: unknown model {model!r}. Use 'dc', 'elo', 'xgb', 'neural', or 'ensemble'.",
                 err=False,
             )
             raise typer.Exit(1)

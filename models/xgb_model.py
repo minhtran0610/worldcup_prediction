@@ -16,6 +16,7 @@ _XGB_PARAMS: dict = {
     "random_state": 42,
     "objective": "reg:squarederror",
     "verbosity": 0,
+    "device": "cuda",
 }
 
 _FEATURE_COLS = [

@@ -23,6 +23,9 @@ def main(
     model: str = typer.Option("dc", help="Model: 'dc', 'elo', 'xgb', 'neural', or 'ensemble'"),
     min_train_months: int = typer.Option(36, help="Minimum training months before first fold"),
     val_months: int = typer.Option(6, help="Validation window length in months"),
+    start_year: int = typer.Option(
+        2000, help="Ignore matches before this year (avoids 1872-era sparse folds)"
+    ),
     tournament_filter: str | None = typer.Option(None, help="Filter to a specific tournament name"),
 ) -> None:
     try:
@@ -36,6 +39,8 @@ def main(
 
     if tournament_filter is not None:
         results = results[results["tournament"] == tournament_filter].reset_index(drop=True)
+
+    results = results[results["date"].dt.year >= start_year].reset_index(drop=True)
 
     folds = generate_folds(
         results, min_train_months=min_train_months, val_duration_months=val_months
@@ -53,6 +58,15 @@ def main(
         val_df = results[(results["date"] >= val_start) & (results["date"] < val_end)].reset_index(
             drop=True
         )
+
+        if val_df.empty:
+            continue
+
+        # Drop val matches involving teams not seen in training — model can't predict them
+        train_teams = set(train_df["home_team"]) | set(train_df["away_team"])
+        val_df = val_df[
+            val_df["home_team"].isin(train_teams) & val_df["away_team"].isin(train_teams)
+        ].reset_index(drop=True)
 
         if val_df.empty:
             continue

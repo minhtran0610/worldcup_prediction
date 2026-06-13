@@ -67,11 +67,16 @@ def rps_1x2(probs: np.ndarray, outcome_idx: int) -> float:
 def nll_scoreline(grid: np.ndarray, home_goals: int, away_goals: int) -> float:
     """Negative log-likelihood of the actual scoreline under the predicted grid.
 
+    Scores beyond the grid boundary (> 7) are clipped to the last index, which
+    already holds the renormalized mass for "7+ goals" after grid truncation.
     Clips grid values to a minimum of 1e-10 before taking log to avoid -inf.
     Returns a positive float (lower = better model).
     """
     grid = np.asarray(grid, dtype=float)
-    p = float(grid[home_goals, away_goals])
+    max_idx = grid.shape[0] - 1
+    h = min(home_goals, max_idx)
+    a = min(away_goals, max_idx)
+    p = float(grid[h, a])
     p = max(p, _LOG_CLIP_MIN)
     return -np.log(p)
 

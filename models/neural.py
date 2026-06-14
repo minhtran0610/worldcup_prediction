@@ -342,7 +342,14 @@ class NeuralModel:
             self._device
         )
 
+        # Precompute all train tensors once — avoids re-running get_form_sequence each batch
+        print("Precomputing train form sequences...", flush=True)
+        train_home_idx, train_away_idx, train_home_seq, train_away_seq, train_ctx = (
+            self._build_batch_tensors(train_df, form_df)
+        )
+
         # Pre-build val tensors (fixed each epoch)
+        print("Precomputing val form sequences...", flush=True)
         val_home_idx, val_away_idx, val_home_seq, val_away_seq, val_ctx = self._build_batch_tensors(
             val_df, form_df
         )
@@ -361,12 +368,12 @@ class NeuralModel:
 
             for start in range(0, n_train, self.batch_size):
                 idx = perm[start : start + self.batch_size]
-                idx_np = idx.cpu().numpy()
-                batch_rows = train_df.iloc[idx_np].reset_index(drop=True)
 
-                home_idx, away_idx, home_seq, away_seq, ctx = self._build_batch_tensors(
-                    batch_rows, form_df
-                )
+                home_idx = train_home_idx[idx]
+                away_idx = train_away_idx[idx]
+                home_seq = train_home_seq[idx]
+                away_seq = train_away_seq[idx]
+                ctx = train_ctx[idx]
                 hs = train_hs[idx]
                 as_ = train_as[idx]
 

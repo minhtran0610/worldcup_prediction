@@ -43,6 +43,10 @@ def make_results(n: int = 200) -> pd.DataFrame:
             "is_host_home": [False] * n,
             "is_host_away": [False] * n,
             "sample_weight": [1.0] * n,
+            "squad_top5_home": [0.0] * n,
+            "squad_top5_away": [0.0] * n,
+            "squad_caps_home": [0.0] * n,
+            "squad_caps_away": [0.0] * n,
         }
     )
 
@@ -83,6 +87,10 @@ def test_matches() -> pd.DataFrame:
             "is_host_home": [False] * 10,
             "is_host_away": [False] * 10,
             "sample_weight": [1.0] * 10,
+            "squad_top5_home": [0.0] * 10,
+            "squad_top5_away": [0.0] * 10,
+            "squad_caps_home": [0.0] * 10,
+            "squad_caps_away": [0.0] * 10,
         }
     )
 
@@ -99,7 +107,7 @@ def _make_random_batch(batch_size: int, n_teams: int = 9):
     away_idx = torch.randint(1, n_teams, (batch_size,))
     home_seq = torch.randn(batch_size, FORM_N, FORM_FEATURE_DIM)
     away_seq = torch.randn(batch_size, FORM_N, FORM_FEATURE_DIM)
-    context = torch.randn(batch_size, 7)
+    context = torch.randn(batch_size, 11)  # 11-dim: 7 original + 4 squad features
     return home_idx, away_idx, home_seq, away_seq, context
 
 
@@ -233,6 +241,10 @@ def test_neural_predict_batch_unknown_team_does_not_raise(fitted_neural_model):
             "is_host_home": [False],
             "is_host_away": [False],
             "sample_weight": [1.0],
+            "squad_top5_home": [0.0],
+            "squad_top5_away": [0.0],
+            "squad_caps_home": [0.0],
+            "squad_caps_away": [0.0],
         }
     )
     try:

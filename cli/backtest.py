@@ -8,6 +8,7 @@ from data.ingest.results import load_results
 from eval.backtest import FoldResult, fold_metrics, generate_folds, print_backtest_report
 from features.context import derive_context
 from features.elo import compute_elo_ratings
+from features.squad_registry import SquadRegistry
 from models.dixon_coles import DixonColesModel
 from models.elo_model import EloModel
 from models.ensemble import EnsembleModel
@@ -35,7 +36,10 @@ def main(
         raise typer.Exit(1)
 
     results = compute_elo_ratings(results)
-    results = derive_context(results)
+
+    typer.echo("Building squad registry...", err=True)
+    registry = SquadRegistry.build()
+    results = derive_context(results, squad_registry=registry)
 
     if tournament_filter is not None:
         results = results[results["tournament"] == tournament_filter].reset_index(drop=True)

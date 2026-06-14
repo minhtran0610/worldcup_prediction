@@ -1,8 +1,11 @@
 import logging
+import re
 import warnings
+from io import StringIO
 
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 
 from data.ingest.cache import load_cache, save_cache
 
@@ -60,114 +63,131 @@ def _normalise_position(raw: str) -> str | None:
     return None
 
 
+_AGE_RE = re.compile(r"aged\s+(\d+)", re.IGNORECASE)
+
+
+def _parse_age(raw: object) -> int:
+    """Extract integer age from strings like '30 March 1987 (aged 35)'."""
+    s = str(raw)
+    m = _AGE_RE.search(s)
+    if m:
+        return int(m.group(1))
+    # fallback: first standalone integer in the string
+    digits = re.findall(r"\b(\d{1,3})\b", s)
+    for d in digits:
+        v = int(d)
+        if 14 <= v <= 50:
+            return v
+    return 0
+
+
+def _parse_squad_table(team_name: str, tbl: pd.DataFrame) -> list[dict]:
+    """Extract player records from a single squad table."""
+    tbl = tbl.copy()
+    tbl.columns = [
+        " ".join(str(c) for c in col).strip() if isinstance(col, tuple) else str(col)
+        for col in tbl.columns
+    ]
+    col_lower = {c: c.lower() for c in tbl.columns}
+
+    player_col = next((c for c, cl in col_lower.items() if "player" in cl or "name" in cl), None)
+    pos_col = next((c for c, cl in col_lower.items() if "pos" in cl), None)
+    club_col = next((c for c, cl in col_lower.items() if "club" in cl), None)
+    club_country_col = next(
+        (c for c, cl in col_lower.items() if "country" in cl or "league" in cl), None
+    )
+    age_col = next(
+        (c for c, cl in col_lower.items() if "age" in cl or "birth" in cl or "dob" in cl), None
+    )
+    caps_col = next((c for c, cl in col_lower.items() if "cap" in cl), None)
+
+    if player_col is None or pos_col is None or club_col is None:
+        return []
+
+    records: list[dict] = []
+    for _, row in tbl.iterrows():
+        try:
+            player_name = str(row[player_col]).strip()
+            if not player_name or player_name.lower() in {"nan", "player", "name"}:
+                continue
+
+            raw_pos = str(row[pos_col]).strip()
+            pos = _normalise_position(raw_pos)
+            if pos is None:
+                logger.warning(
+                    "[squads] unrecognised position %r for player %r — skipping",
+                    raw_pos,
+                    player_name,
+                )
+                continue
+
+            club = str(row[club_col]).strip()
+            club_country = (
+                str(row[club_country_col]).strip()
+                if club_country_col and club_country_col in row.index
+                else ""
+            )
+            age = _parse_age(row[age_col]) if age_col else 0
+
+            caps = 0
+            if caps_col:
+                try:
+                    caps_raw = str(row[caps_col]).strip()
+                    caps = int(caps_raw) if caps_raw.isdigit() else 0
+                except (ValueError, TypeError):
+                    caps = 0
+
+            records.append(
+                {
+                    "team": team_name,
+                    "player_name": player_name,
+                    "position": pos,
+                    "club": club,
+                    "club_country": club_country,
+                    "age": age,
+                    "caps": caps,
+                }
+            )
+        except Exception as exc:
+            logger.warning("[squads] skipping row due to error: %s", exc)
+    return records
+
+
 def _scrape_wikipedia(url: str) -> pd.DataFrame:
     """Parse a Wikipedia tournament squads page.
 
-    Expected layout: one table per team with columns
-    No. / Pos. / Player / Date of birth (age) / Caps / Goals / Club.
-    Team names come from <h3> section headings, in the same order as the tables.
+    Each team's <h3> heading is followed immediately by its wikitable.
+    Team names are taken from the h3 text; player data comes from the table.
     """
     response = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     response.raise_for_status()
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        tables = pd.read_html(response.text)
-
+    soup = BeautifulSoup(response.text, "html.parser")
     records: list[dict] = []
 
-    for tbl in tables:
-        tbl.columns = [
-            " ".join(str(c) for c in col).strip() if isinstance(col, tuple) else str(col)
-            for col in tbl.columns
-        ]
-
-        col_lower = {c: c.lower() for c in tbl.columns}
-
-        player_col = next(
-            (c for c, cl in col_lower.items() if "player" in cl or "name" in cl), None
-        )
-        pos_col = next((c for c, cl in col_lower.items() if "pos" in cl), None)
-        club_col = next((c for c, cl in col_lower.items() if "club" in cl), None)
-        club_country_col = next(
-            (c for c, cl in col_lower.items() if "country" in cl or "league" in cl), None
-        )
-        age_col = next((c for c, cl in col_lower.items() if "age" in cl), None)
-        team_col = next((c for c, cl in col_lower.items() if "nation" in cl or "team" in cl), None)
-        caps_col = next((c for c, cl in col_lower.items() if "cap" in cl), None)
-
-        if player_col is None or pos_col is None or club_col is None:
+    for h3 in soup.find_all("h3"):
+        team_name = h3.get_text(strip=True)
+        if not team_name or len(team_name) < 2:
             continue
 
-        team_name: str | None = None
-        if team_col is not None:
-            unique_teams = tbl[team_col].dropna().unique()
-            if len(unique_teams) == 1:
-                team_name = str(unique_teams[0])
+        next_table = h3.find_next("table")
+        if next_table is None:
+            continue
 
-        for _, row in tbl.iterrows():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
             try:
-                player_name = str(row[player_col]).strip()
-                if not player_name or player_name.lower() in {"nan", "player", "name"}:
-                    continue
-
-                raw_pos = str(row[pos_col]).strip()
-                pos = _normalise_position(raw_pos)
-                if pos is None:
-                    logger.warning(
-                        "[squads] unrecognised position %r for player %r — skipping row",
-                        raw_pos,
-                        player_name,
-                    )
-                    continue
-
-                club = str(row[club_col]).strip() if club_col else ""
-                club_country = (
-                    str(row[club_country_col]).strip()
-                    if club_country_col and club_country_col in row.index
-                    else ""
-                )
-                age_raw = row[age_col] if age_col else None
-                try:
-                    age = int(str(age_raw).split("-")[0]) if age_raw is not None else 0
-                except (ValueError, TypeError):
-                    age = 0
-
-                # Parse caps
-                caps = 0
-                if caps_col:
-                    try:
-                        caps_raw = str(row[caps_col]).strip()
-                        caps = int(caps_raw) if caps_raw.isdigit() else 0
-                    except (ValueError, TypeError):
-                        caps = 0
-
-                team = (
-                    str(row[team_col]).strip()
-                    if team_col and not pd.isna(row.get(team_col))
-                    else (team_name or "")
-                )
-
-                records.append(
-                    {
-                        "team": team,
-                        "player_name": player_name,
-                        "position": pos,
-                        "club": club,
-                        "club_country": club_country,
-                        "age": age,
-                        "caps": caps,
-                    }
-                )
-            except Exception as exc:
-                logger.warning("[squads] skipping row due to error: %s", exc)
+                tbl = pd.read_html(StringIO(str(next_table)))[0]
+            except Exception:
                 continue
+
+        records.extend(_parse_squad_table(team_name, tbl))
 
     if not records:
         raise RuntimeError(
             f"Wikipedia squad scrape returned no usable rows from {url}. "
-            "The page format may have changed. Inspect the tables manually and update "
-            "_scrape_wikipedia() in data/ingest/squads.py."
+            "The page format may have changed. Inspect the h3 headings and tables manually "
+            "and update _scrape_wikipedia() in data/ingest/squads.py."
         )
 
     df = pd.DataFrame(records)

@@ -22,7 +22,7 @@ def main(
     checkpoint: Path = typer.Option(
         Path("data/raw/neural_checkpoint.pt"), help="Where to save checkpoint"
     ),
-    n_epochs: int = typer.Option(80, help="Maximum training epochs"),
+    n_epochs: int = typer.Option(150, help="Maximum training epochs"),
     lr: float = typer.Option(3e-4, help="Adam learning rate"),
     val_months: int = typer.Option(6, help="Hold-out validation months at end of data"),
     tournament_filter: str | None = typer.Option(None, help="Filter to specific tournament"),

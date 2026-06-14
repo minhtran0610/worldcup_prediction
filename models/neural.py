@@ -228,7 +228,7 @@ class NeuralModel:
 
     def __init__(
         self,
-        n_epochs: int = 80,
+        n_epochs: int = 150,
         lr: float = 3e-4,
         weight_decay: float = 1e-4,
         batch_size: int = 256,

@@ -15,7 +15,7 @@ from models.grid import build_grid, derive_markets
 
 EMBED_DIM: int = 32
 GRU_HIDDEN: int = 32
-CONTEXT_DIM: int = 7
+CONTEXT_DIM: int = 11
 
 # Clip floor for NLL loss to prevent log(0)
 _LOG_CLIP: float = 1e-10
@@ -27,7 +27,7 @@ class ScoreGridNet(nn.Module):
     Architecture:
         - Team embedding for home and away (index 0 reserved for UNK)
         - Shared GRU form encoder applied to each team's recent-match sequence
-        - Small MLP on 7-dim context features
+        - Small MLP on 11-dim context features
         - Fusion MLP that concatenates all branches and outputs the 3 distribution parameters
     """
 
@@ -45,7 +45,7 @@ class ScoreGridNet(nn.Module):
             batch_first=True,
         )
 
-        # Context MLP: 7 scalar features -> 16-dim
+        # Context MLP: 11 scalar features -> 16-dim
         self.context_mlp = nn.Sequential(
             nn.Linear(CONTEXT_DIM, 32),
             nn.ReLU(),
@@ -67,7 +67,7 @@ class ScoreGridNet(nn.Module):
         away_idx: torch.Tensor,  # (batch,) long
         home_seq: torch.Tensor,  # (batch, FORM_N, 5) float
         away_seq: torch.Tensor,  # (batch, FORM_N, 5) float
-        context: torch.Tensor,  # (batch, 7) float
+        context: torch.Tensor,  # (batch, 11) float
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return (lambda_home, lambda_away, rho) each shape (batch,)."""
         home_emb = self.team_embed(home_idx)  # (batch, 32)
@@ -95,16 +95,20 @@ def _build_context_tensor(
     rows: pd.DataFrame,
     device: torch.device,
 ) -> torch.Tensor:
-    """Construct the (N, 7) normalised context tensor from a DataFrame slice.
+    """Construct the (N, 11) normalised context tensor from a DataFrame slice.
 
     Features (in order):
-        0: neutral (float)
-        1: rest_days_home / 180  (NaN -> 0)
-        2: rest_days_away / 180  (NaN -> 0)
-        3: elo_diff / 400
-        4: is_knockout (float)
-        5: is_host_home (float)
-        6: is_host_away (float)
+        0:  neutral (float)
+        1:  rest_days_home / 180  (NaN -> 0)
+        2:  rest_days_away / 180  (NaN -> 0)
+        3:  elo_diff / 400
+        4:  is_knockout (float)
+        5:  is_host_home (float)
+        6:  is_host_away (float)
+        7:  squad_top5_home (float, fraction of squad in Big 5 leagues; default 0.0)
+        8:  squad_top5_away (float)
+        9:  squad_caps_home (float, avg caps / 100; default 0.0)
+        10: squad_caps_away (float)
     """
     neutral = rows["neutral"].to_numpy(dtype=np.float32)
     rest_h = rows["rest_days_home"].fillna(0.0).to_numpy(dtype=np.float32) / 180.0
@@ -114,7 +118,44 @@ def _build_context_tensor(
     is_hh = rows["is_host_home"].to_numpy(dtype=np.float32)
     is_ha = rows["is_host_away"].to_numpy(dtype=np.float32)
 
-    arr = np.stack([neutral, rest_h, rest_a, elo_diff, is_ko, is_hh, is_ha], axis=1)
+    # Squad features — present when registry was used in derive_context; otherwise 0.0
+    sq_top5_h = (
+        rows["squad_top5_home"].fillna(0.0).to_numpy(dtype=np.float32)
+        if "squad_top5_home" in rows.columns
+        else np.zeros(len(rows), dtype=np.float32)
+    )
+    sq_top5_a = (
+        rows["squad_top5_away"].fillna(0.0).to_numpy(dtype=np.float32)
+        if "squad_top5_away" in rows.columns
+        else np.zeros(len(rows), dtype=np.float32)
+    )
+    sq_caps_h = (
+        rows["squad_caps_home"].fillna(0.0).to_numpy(dtype=np.float32)
+        if "squad_caps_home" in rows.columns
+        else np.zeros(len(rows), dtype=np.float32)
+    )
+    sq_caps_a = (
+        rows["squad_caps_away"].fillna(0.0).to_numpy(dtype=np.float32)
+        if "squad_caps_away" in rows.columns
+        else np.zeros(len(rows), dtype=np.float32)
+    )
+
+    arr = np.stack(
+        [
+            neutral,
+            rest_h,
+            rest_a,
+            elo_diff,
+            is_ko,
+            is_hh,
+            is_ha,
+            sq_top5_h,
+            sq_top5_a,
+            sq_caps_h,
+            sq_caps_a,
+        ],
+        axis=1,
+    )
     return torch.from_numpy(arr).to(device)
 
 

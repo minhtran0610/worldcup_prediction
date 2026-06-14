@@ -13,6 +13,7 @@ from eval.backtest import KELLY_FRACTION
 from eval.metrics import remove_margin
 from features.context import WC_2026_HOSTS, derive_context
 from features.elo import compute_elo_ratings, get_current_ratings
+from features.squad_registry import SquadRegistry
 
 app = typer.Typer()
 
@@ -104,12 +105,14 @@ def _format_row_no_odds(
 def _build_upcoming_match_df(
     schedule: pd.DataFrame,
     elo_ratings: dict[str, float],
+    squad_registry: SquadRegistry | None = None,
 ) -> pd.DataFrame:
     """Build a DataFrame of upcoming WC matches with all columns models need.
 
     Uses the last known Elo ratings for each team (computed over all training
     data).  All WC matches are neutral-venue, group-stage by default.
     Rest days default to 7 (a reasonable inter-match rest for WC group stage).
+    Squad features are populated from squad_registry if provided.
     """
     DEFAULT_ELO = 1500.0
     DEFAULT_REST = 7.0
@@ -120,6 +123,14 @@ def _build_upcoming_match_df(
         away = row.away_team
         elo_h = elo_ratings.get(home, DEFAULT_ELO)
         elo_a = elo_ratings.get(away, DEFAULT_ELO)
+
+        # Squad quality features for WC 2026
+        if squad_registry is not None:
+            feats_h = squad_registry.get_features(home, 2026, "FIFA World Cup")
+            feats_a = squad_registry.get_features(away, 2026, "FIFA World Cup")
+        else:
+            feats_h = {"top5_share": 0.0, "avg_caps_norm": 0.0}
+            feats_a = {"top5_share": 0.0, "avg_caps_norm": 0.0}
 
         rows.append(
             {
@@ -142,6 +153,10 @@ def _build_upcoming_match_df(
                 "is_host_home": home in WC_2026_HOSTS,
                 "is_host_away": away in WC_2026_HOSTS,
                 "sample_weight": 1.0,
+                "squad_top5_home": feats_h["top5_share"],
+                "squad_top5_away": feats_a["top5_share"],
+                "squad_caps_home": feats_h["avg_caps_norm"],
+                "squad_caps_away": feats_a["avg_caps_norm"],
             }
         )
 
@@ -297,7 +312,10 @@ def main(
         raise typer.Exit(1)
 
     results = compute_elo_ratings(results)
-    results = derive_context(results)
+
+    typer.echo("Building squad registry...", err=True)
+    registry = SquadRegistry.build()
+    results = derive_context(results, squad_registry=registry)
 
     n_matches = len(results)
     typer.echo(f"Loaded {n_matches} historical matches.", err=True)
@@ -345,7 +363,7 @@ def main(
     # 4. Build synthetic match DataFrame for prediction
     # ------------------------------------------------------------------
     elo_ratings = get_current_ratings(results)
-    match_df = _build_upcoming_match_df(upcoming, elo_ratings)
+    match_df = _build_upcoming_match_df(upcoming, elo_ratings, registry)
 
     # ------------------------------------------------------------------
     # 5. Predict

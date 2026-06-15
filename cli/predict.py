@@ -42,7 +42,10 @@ def main(
     odds_home: float | None = typer.Option(None, help="Closing decimal odds for home win"),
     odds_draw: float | None = typer.Option(None, help="Closing decimal odds for draw"),
     odds_away: float | None = typer.Option(None, help="Closing decimal odds for away win"),
-    model: str = typer.Option("dc", help="Model: 'dc' (Dixon-Coles) or 'elo'"),
+    model: str = typer.Option("neural", help="Model: 'neural', 'dc', or 'elo'"),
+    checkpoint: Path = typer.Option(
+        Path("checkpoints/neural_v2.pt"), help="Neural model checkpoint path"
+    ),
 ) -> None:
     try:
         results = load_results(csv_path=csv_path)
@@ -197,6 +200,130 @@ def main(
             else:
                 typer.echo(f"  Best:  {label} {best_edge * 100:+.1f}pp -> EV {ev_pct:+.1f}%")
 
+    elif model == "neural":
+        from features.squad_registry import SquadRegistry
+        from models.neural import NeuralModel
+
+        registry = SquadRegistry.build()
+        results = derive_context(results, squad_registry=registry)
+
+        if checkpoint.exists():
+            m = NeuralModel.load(str(checkpoint))
+        else:
+            typer.echo("No checkpoint found — fitting neural model from scratch...", err=True)
+            m = NeuralModel()
+            m.fit(results)
+
+        import pandas as pd
+
+        row = pd.DataFrame(
+            [
+                {
+                    "home_team": home,
+                    "away_team": away,
+                    "date": pd.Timestamp.now(),
+                    "neutral": neutral,
+                    "rest_days_home": 7,
+                    "rest_days_away": 7,
+                    "elo_home_pre": results.loc[results["home_team"] == home, "elo_home_pre"].iloc[
+                        -1
+                    ]
+                    if len(results[results["home_team"] == home]) > 0
+                    else 1500.0,
+                    "elo_away_pre": results.loc[results["away_team"] == away, "elo_away_pre"].iloc[
+                        -1
+                    ]
+                    if len(results[results["away_team"] == away]) > 0
+                    else 1500.0,
+                    "is_knockout": stage == "knockout",
+                    "is_host_home": False,
+                    "is_host_away": False,
+                    "squad_top5_home": 0.0,
+                    "squad_top5_away": 0.0,
+                    "squad_caps_home": 0.0,
+                    "squad_caps_away": 0.0,
+                    "home_score": 0,
+                    "away_score": 0,
+                    "tournament": "FIFA World Cup",
+                }
+            ]
+        )
+        feats_h = registry.get_features(home, 2026, "FIFA World Cup")
+        feats_a = registry.get_features(away, 2026, "FIFA World Cup")
+        row["squad_top5_home"] = feats_h["top5_share"]
+        row["squad_top5_away"] = feats_a["top5_share"]
+        row["squad_caps_home"] = feats_h["avg_caps_norm"]
+        row["squad_caps_away"] = feats_a["avg_caps_norm"]
+
+        pred = m.predict_batch(row)
+        grid = pred["grid"].iloc[0]
+        markets = {
+            "home_win": float(pred["prob_home"].iloc[0]),
+            "draw": float(pred["prob_draw"].iloc[0]),
+            "away_win": float(pred["prob_away"].iloc[0]),
+            "over_2_5": float(pred["prob_over_2_5"].iloc[0]),
+            "btts_yes": float(pred["prob_btts"].iloc[0]),
+        }
+        exp_home, exp_away = expected_goals(grid)
+        scores = top_scorelines(grid, n=5)
+
+        typer.echo("")
+        typer.echo(_context_line(home, away, neutral, stage))
+        typer.echo("")
+        typer.echo(f"  Expected goals:  {exp_home:.2f} - {exp_away:.2f}")
+        typer.echo(
+            f"  1X2:       Home {_format_pct(markets['home_win'])}"
+            f"   Draw {_format_pct(markets['draw'])}"
+            f"   Away {_format_pct(markets['away_win'])}"
+        )
+        typer.echo(
+            f"  Over 2.5:  {_format_pct(markets['over_2_5'])}"
+            f"   BTTS: {_format_pct(markets['btts_yes'])}"
+        )
+        score_parts = " | ".join(f"{h}-{a} {_format_pct(p)}" for h, a, p in scores)
+        typer.echo(f"  Top scores:  {score_parts}")
+
+        has_odds = odds_home is not None and odds_draw is not None and odds_away is not None
+        if has_odds:
+            raw_odds = {
+                "home": odds_home,  # type: ignore[arg-type]
+                "draw": odds_draw,  # type: ignore[arg-type]
+                "away": odds_away,  # type: ignore[arg-type]
+            }
+            market_probs = remove_margin(raw_odds)
+            edge_home = markets["home_win"] - market_probs["home"]
+            edge_draw = markets["draw"] - market_probs["draw"]
+            edge_away = markets["away_win"] - market_probs["away"]
+            edges = {
+                "home": (edge_home, odds_home),
+                "draw": (edge_draw, odds_draw),
+                "away": (edge_away, odds_away),
+            }
+            best_outcome = max(edges, key=lambda k: edges[k][0])
+            best_edge, best_decimal_odds = edges[best_outcome]
+            typer.echo("")
+            typer.echo("  --- vs market (margin-removed) ---")
+            typer.echo(
+                f"  Market 1X2:  {_format_pct(market_probs['home'])} / "
+                f"{_format_pct(market_probs['draw'])} / "
+                f"{_format_pct(market_probs['away'])}"
+            )
+            typer.echo(
+                f"  Edge:  Home {edge_home * 100:+.1f}pp"
+                f"  Draw {edge_draw * 100:+.1f}pp"
+                f"  Away {edge_away * 100:+.1f}pp"
+            )
+            label = best_outcome.capitalize()
+            ev_pct = best_edge / market_probs[best_outcome] * 100
+            if best_edge >= MIN_EDGE:
+                kelly_pct = KELLY_FRACTION * best_edge / best_decimal_odds * 100
+                typer.echo(
+                    f"  Best:  {label} {best_edge * 100:+.1f}pp -> EV {ev_pct:+.1f}%  [value]"
+                )
+                typer.echo(f"  Kelly (1/4):  {kelly_pct:.1f}% of bankroll")
+            else:
+                typer.echo(f"  Best:  {label} {best_edge * 100:+.1f}pp -> EV {ev_pct:+.1f}%")
+
     else:
-        typer.echo(f"Error: unknown model {model!r}. Use 'dc' or 'elo'.", err=False)
+        typer.echo(f"Error: unknown model {model!r}. Use 'neural', 'dc', or 'elo'.", err=False)
         raise typer.Exit(1)

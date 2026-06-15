@@ -282,7 +282,7 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
 @app.command()
 def main(
     csv_path: Path | None = typer.Option(None, help="Path to Kaggle results CSV"),
-    model: str = typer.Option("dc", help="Model: 'dc', 'xgb', 'neural', 'ensemble'"),
+    model: str = typer.Option("neural", help="Model: 'dc', 'xgb', 'neural', 'ensemble'"),
     checkpoint: Path | None = typer.Option(
         None, help="Neural checkpoint path (for neural/ensemble)"
     ),

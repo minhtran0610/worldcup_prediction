@@ -43,6 +43,7 @@ ignore = ["E501", "B008", "B904"]
 
 [tool.ty.rules]
 unresolved-attribute = "ignore"
+unresolved-import = "warn"
 invalid-argument-type = "warn"
 invalid-assignment = "warn"
 

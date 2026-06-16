@@ -209,6 +209,7 @@ def main(
 
         if checkpoint.exists():
             m = NeuralModel.load(str(checkpoint))
+            m._train_results = results
         else:
             typer.echo("No checkpoint found — fitting neural model from scratch...", err=True)
             m = NeuralModel()

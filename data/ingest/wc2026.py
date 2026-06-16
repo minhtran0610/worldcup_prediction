@@ -254,14 +254,14 @@ def _scrape_legacy_columns(tables: list[pd.DataFrame]) -> list[dict]:
                 try:
                     candidate = pd.to_datetime(date_raw, format=fmt)
                     if candidate is not pd.NaT:
-                        parsed_date = pd.Timestamp(candidate)
+                        parsed_date = pd.Timestamp(candidate)  # ty: ignore[invalid-assignment]
                     break
                 except Exception:
                     continue
             if parsed_date is None:
                 try:
                     candidate = pd.to_datetime(date_raw, dayfirst=True)
-                    parsed_date = pd.Timestamp(candidate) if candidate is not pd.NaT else None
+                    parsed_date = pd.Timestamp(candidate) if candidate is not pd.NaT else None  # ty: ignore[invalid-assignment]
                 except Exception:
                     pass
 
@@ -350,7 +350,7 @@ def _scrape_fallback(tables: list[pd.DataFrame]) -> list[dict]:
 
 
 def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
-    """Load WC 2026 group stage schedule from cache or Wikipedia.
+    """Load WC 2026 schedule from cache, API-Football, or Wikipedia (in that order).
 
     Returns DataFrame with columns:
         date (pd.Timestamp, UTC-naive)
@@ -358,13 +358,17 @@ def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
         away_team (str) — mapped to training-data name
         home_score (int | None) — None if match not yet played
         away_score (int | None) — None if match not yet played
-        stage (str) — "Group A", "Group B", ..., or "Round of 32"
+        stage (str) — e.g. "Group Stage - 1", "Round of 16"
         venue (str)
         is_completed (bool)
 
+    Source priority:
+        1. Cache (skipped when force_refresh=True)
+        2. API-Football (if API_FOOTBALL_KEY is set) — real dates, structured JSON
+        3. Wikipedia scrape — fallback; completed matches may have NaT dates
+
     Caches to data/raw/wc2026_schedule.parquet.
-    Falls back to returning an empty DataFrame (with correct columns) if
-    scraping fails, so the rest of the pipeline still works.
+    Returns an empty DataFrame (with correct columns) if all sources fail.
     """
     cache_name = "wc2026_schedule"
 
@@ -373,10 +377,37 @@ def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
         if cached is not None:
             return cached
 
+    # --- Primary: API-Football (requires paid plan for current season) ---
+    from data.ingest.api_football import fetch_wc2026_fixtures as _af_fetch
+    from data.ingest.api_football import get_api_key as _af_key
+
+    if _af_key():
+        df = _af_fetch()
+        if not df.empty:
+            try:
+                save_cache(cache_name, df)
+            except Exception as exc:
+                print(f"[wc2026] WARNING: could not save cache — {exc}")
+            return df
+        print("[wc2026] API-Football returned empty — trying openfootball.")
+
+    # --- Secondary: openfootball/worldcup.json (free, no auth, ~daily updates) ---
+    from data.ingest.openfootball import fetch_wc2026_fixtures as _of_fetch
+
+    df = _of_fetch()
+    if not df.empty:
+        try:
+            save_cache(cache_name, df)
+        except Exception as exc:
+            print(f"[wc2026] WARNING: could not save cache — {exc}")
+        return df
+    print("[wc2026] openfootball returned empty — falling back to Wikipedia scrape.")
+
+    # --- Fallback: Wikipedia scrape ---
     try:
         df = _scrape_wikipedia()
     except Exception as exc:
-        print(f"[wc2026] WARNING: scraping failed — {exc}")
+        print(f"[wc2026] WARNING: Wikipedia scraping failed — {exc}")
         print("[wc2026] Returning empty DataFrame; pipeline can continue without schedule.")
         return _empty_df()
 

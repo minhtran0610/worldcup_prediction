@@ -12,7 +12,7 @@ from data.ingest.wc2026 import load_wc2026_schedule
 from eval.backtest import KELLY_FRACTION
 from eval.metrics import remove_margin
 from features.context import WC_2026_HOSTS, derive_context
-from features.elo import compute_elo_ratings, get_current_ratings
+from features.elo import compute_elo_ratings, extend_elo_through_matches, get_current_ratings
 from features.squad_registry import SquadRegistry
 
 app = typer.Typer()
@@ -21,6 +21,7 @@ app = typer.Typer()
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
+_COL_KO = 11  # "Jun 16 22:00"
 _COL_MATCH = 26
 _COL_PROB = 7
 _COL_EDGE = 8
@@ -31,8 +32,17 @@ def _pct(value: float) -> str:
     return f"{value * 100:.1f}"
 
 
+def _ko_str(dt: pd.Timestamp) -> str:
+    """Format kickoff as 'Jun 16 22:00' (UTC)."""
+    try:
+        return dt.strftime("%b %d %H:%M")
+    except Exception:
+        return " " * _COL_KO
+
+
 def _header_with_odds() -> str:
     return (
+        f"{'Kickoff (UTC)':<{_COL_KO}} "
         f"{'Match':<{_COL_MATCH}} "
         f"{'Home%':>{_COL_PROB}} {'Draw%':>{_COL_PROB}} {'Away%':>{_COL_PROB}}  "
         f"{'MktH%':>{_COL_PROB}} {'MktD%':>{_COL_PROB}} {'MktA%':>{_COL_PROB}}  "
@@ -42,6 +52,7 @@ def _header_with_odds() -> str:
 
 def _header_no_odds() -> str:
     return (
+        f"{'Kickoff (UTC)':<{_COL_KO}} "
         f"{'Match':<{_COL_MATCH}} "
         f"{'Home%':>{_COL_PROB}} {'Draw%':>{_COL_PROB}} {'Away%':>{_COL_PROB}}"
     )
@@ -61,6 +72,7 @@ def _match_label(home: str, away: str) -> str:
 def _format_row_with_odds(
     home: str,
     away: str,
+    kickoff: pd.Timestamp,
     prob_home: float,
     prob_draw: float,
     prob_away: float,
@@ -71,11 +83,13 @@ def _format_row_with_odds(
     kelly: float,
     is_value: bool,
 ) -> str:
+    ko = _ko_str(kickoff)
     label = _match_label(home, away)
     edge_str = f"{best_edge * 100:+.1f}pp"
     kelly_str = f"{kelly * 100:.1f}%"
     value_marker = " *" if is_value else "  "
     return (
+        f"{ko:<{_COL_KO}} "
         f"{label:<{_COL_MATCH}} "
         f"{_pct(prob_home):>{_COL_PROB}} {_pct(prob_draw):>{_COL_PROB}} {_pct(prob_away):>{_COL_PROB}}  "
         f"{_pct(mkt_home):>{_COL_PROB}} {_pct(mkt_draw):>{_COL_PROB}} {_pct(mkt_away):>{_COL_PROB}}  "
@@ -86,12 +100,15 @@ def _format_row_with_odds(
 def _format_row_no_odds(
     home: str,
     away: str,
+    kickoff: pd.Timestamp,
     prob_home: float,
     prob_draw: float,
     prob_away: float,
 ) -> str:
+    ko = _ko_str(kickoff)
     label = _match_label(home, away)
     return (
+        f"{ko:<{_COL_KO}} "
         f"{label:<{_COL_MATCH}} "
         f"{_pct(prob_home):>{_COL_PROB}} {_pct(prob_draw):>{_COL_PROB}} {_pct(prob_away):>{_COL_PROB}}"
     )
@@ -167,12 +184,34 @@ def _build_upcoming_match_df(
 # Odds matching
 # ---------------------------------------------------------------------------
 
+# Odds-API team name (lowercased) -> our training-data name (lowercased)
+_ODDS_NAME_MAP: dict[str, str] = {
+    "usa": "united states",
+    "bosnia & herzegovina": "bosnia and herzegovina",
+    "côte d'ivoire": "ivory coast",
+    "cote d'ivoire": "ivory coast",
+    "korea republic": "south korea",
+    "ir iran": "iran",
+    "turkiye": "turkey",
+    "türkiye": "turkey",
+    "dr congo": "dr congo",
+    "democratic republic of congo": "dr congo",
+    "czechia": "czech republic",
+    "cape verde islands": "cape verde",
+    "curacao": "curaçao",
+}
+
+
+def _normalise_odds_name(name: str) -> str:
+    lower = name.lower()
+    return _ODDS_NAME_MAP.get(lower, lower)
+
 
 def _build_odds_index(live_odds: list[dict]) -> dict[tuple[str, str], dict[str, float]]:
-    """Build a lookup dict keyed by (home_team_lower, away_team_lower)."""
+    """Build a lookup dict keyed by (normalised_home, normalised_away)."""
     index: dict[tuple[str, str], dict[str, float]] = {}
     for entry in live_odds:
-        key = (entry["home_team"].lower(), entry["away_team"].lower())
+        key = (_normalise_odds_name(entry["home_team"]), _normalise_odds_name(entry["away_team"]))
         index[key] = entry
     return index
 
@@ -183,11 +222,11 @@ def _find_odds(
     odds_index: dict[tuple[str, str], dict[str, float]],
 ) -> dict[str, float] | None:
     """Look up odds for a match.  Falls back to reversed team order."""
-    key = (home.lower(), away.lower())
+    key = (_normalise_odds_name(home), _normalise_odds_name(away))
     if key in odds_index:
         return odds_index[key]
     # Sometimes the API lists the match with teams swapped
-    rev_key = (away.lower(), home.lower())
+    rev_key = (_normalise_odds_name(away), _normalise_odds_name(home))
     if rev_key in odds_index:
         entry = odds_index[rev_key]
         # Swap home/away prices so they align with our team ordering
@@ -226,6 +265,7 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
         if checkpoint is not None and Path(checkpoint).exists():
             try:
                 m = NeuralModel.load(str(checkpoint))
+                m._train_results = results
                 return m
             except Exception as exc:
                 typer.echo(
@@ -258,6 +298,7 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
             typer.echo(f"Loading neural checkpoint from {checkpoint}...", err=True)
             try:
                 neural = NeuralModel.load(str(checkpoint))
+                neural._train_results = results
                 constituents.append(neural)
                 # Equal weight across all three
                 n = len(constituents)
@@ -317,13 +358,61 @@ def main(
     registry = SquadRegistry.build()
     results = derive_context(results, squad_registry=registry)
 
+    # ------------------------------------------------------------------
+    # 2. Fetch WC 2026 schedule and inject completed results into context
+    # ------------------------------------------------------------------
+    typer.echo("Fetching WC 2026 schedule (live)...", err=True)
+    schedule = load_wc2026_schedule(force_refresh=True)
+
+    if not schedule.empty:
+        completed = (
+            schedule[schedule["is_completed"]].dropna(subset=["home_score", "away_score"]).copy()
+        )
+        if not completed.empty:
+            completed["home_score"] = completed["home_score"].astype(int)
+            completed["away_score"] = completed["away_score"].astype(int)
+            # Wikipedia (1×3) match-table parser doesn't extract dates — fall back to
+            # WC 2026 start date so the Elo forward pass and form sequences work correctly.
+            completed["date"] = completed["date"].fillna(pd.Timestamp("2026-06-11"))
+            completed = completed.sort_values("date").reset_index(drop=True)
+            # neutral and tournament must be set before extend_elo_through_matches
+            # (used for home-advantage and K-factor in the Elo forward pass)
+            completed["neutral"] = True
+            completed["tournament"] = "FIFA World Cup"
+            completed = extend_elo_through_matches(results, completed)
+            completed["country"] = "United States"
+            completed["is_knockout"] = True
+            completed["is_host_home"] = completed["home_team"].isin(WC_2026_HOSTS)
+            completed["is_host_away"] = completed["away_team"].isin(WC_2026_HOSTS)
+            completed["rest_days_home"] = 7.0
+            completed["rest_days_away"] = 7.0
+            completed["sample_weight"] = 1.0
+            for col in ["squad_top5_home", "squad_top5_away", "squad_caps_home", "squad_caps_away"]:
+                completed[col] = 0.0
+            for i, wc_row in completed.iterrows():
+                fh = registry.get_features(wc_row["home_team"], 2026, "FIFA World Cup")
+                fa = registry.get_features(wc_row["away_team"], 2026, "FIFA World Cup")
+                completed.at[i, "squad_top5_home"] = fh["top5_share"]
+                completed.at[i, "squad_top5_away"] = fa["top5_share"]
+                completed.at[i, "squad_caps_home"] = fh["avg_caps_norm"]
+                completed.at[i, "squad_caps_away"] = fa["avg_caps_norm"]
+            results = (
+                pd.concat([results, completed], ignore_index=True)
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+            typer.echo(
+                f"Injected {len(completed)} completed WC 2026 match(es) into training context.",
+                err=True,
+            )
+
     n_matches = len(results)
-    typer.echo(f"Loaded {n_matches} historical matches.", err=True)
+    typer.echo(f"Total context matches (incl. live WC 2026): {n_matches}.", err=True)
 
     # ------------------------------------------------------------------
-    # 2. Fit model
+    # 3. Fit model
     # ------------------------------------------------------------------
-    typer.echo(f"Fitting model '{model}' on all {n_matches} matches...", err=True)
+    typer.echo(f"Fitting model '{model}'...", err=True)
     try:
         fitted_model = _fit_model(model, results, checkpoint)
     except ValueError as exc:
@@ -334,10 +423,8 @@ def main(
         raise typer.Exit(1)
 
     # ------------------------------------------------------------------
-    # 3. Load WC 2026 schedule — upcoming matches only
+    # 4. Filter schedule to upcoming matches only
     # ------------------------------------------------------------------
-    schedule = load_wc2026_schedule()
-
     if schedule.empty:
         typer.echo(
             "Could not load WC 2026 schedule (scrape failed or returned empty). "
@@ -346,11 +433,9 @@ def main(
         )
         raise typer.Exit(1)
 
-    # Keep only upcoming matches (not yet completed)
     if "is_completed" in schedule.columns:
         upcoming = schedule[~schedule["is_completed"]].reset_index(drop=True)
     else:
-        # Fallback if column absent
         upcoming = schedule.reset_index(drop=True)
 
     if upcoming.empty:
@@ -411,9 +496,15 @@ def main(
     value_bets_shown = 0
     all_rows_shown = 0
 
+    # Sort upcoming chronologically; keep pred_batch aligned by merging on position
+    sort_order = upcoming["date"].argsort(kind="stable").values
+    upcoming = upcoming.iloc[sort_order].reset_index(drop=True)
+    pred_batch = pred_batch.iloc[sort_order].reset_index(drop=True)
+
     for i, row in enumerate(upcoming.itertuples(index=False)):
         home = row.home_team
         away = row.away_team
+        kickoff = row.date
         prob_home = float(pred_batch["prob_home"].iloc[i])
         prob_draw = float(pred_batch["prob_draw"].iloc[i])
         prob_away = float(pred_batch["prob_away"].iloc[i])
@@ -424,7 +515,7 @@ def main(
             if odds_entry is None:
                 # No odds found for this match — show model probs, mark as no market
                 if show_all:
-                    line = _format_row_no_odds(home, away, prob_home, prob_draw, prob_away)
+                    line = _format_row_no_odds(home, away, kickoff, prob_home, prob_draw, prob_away)
                     typer.echo(line + "  (no market odds)")
                     all_rows_shown += 1
                 continue
@@ -436,7 +527,7 @@ def main(
             # Handle missing draw odds (two-outcome markets) gracefully
             if raw_odds_draw <= 0.0 or not np.isfinite(raw_odds_draw):
                 if show_all:
-                    line = _format_row_no_odds(home, away, prob_home, prob_draw, prob_away)
+                    line = _format_row_no_odds(home, away, kickoff, prob_home, prob_draw, prob_away)
                     typer.echo(line + "  (no draw odds)")
                     all_rows_shown += 1
                 continue
@@ -473,6 +564,7 @@ def main(
             line = _format_row_with_odds(
                 home=home,
                 away=away,
+                kickoff=kickoff,
                 prob_home=prob_home,
                 prob_draw=prob_draw,
                 prob_away=prob_away,
@@ -490,7 +582,7 @@ def main(
 
         else:
             # No API key — show model probs only
-            line = _format_row_no_odds(home, away, prob_home, prob_draw, prob_away)
+            line = _format_row_no_odds(home, away, kickoff, prob_home, prob_draw, prob_away)
             typer.echo(line)
             all_rows_shown += 1
 

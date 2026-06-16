@@ -109,3 +109,38 @@ def compute_elo_ratings(results: pd.DataFrame) -> pd.DataFrame:
 def get_current_ratings(results: pd.DataFrame) -> dict[str, float]:
     final_ratings, _, _ = _run_elo_pass(results, record_pre=False)
     return final_ratings
+
+
+def extend_elo_through_matches(
+    base_results: pd.DataFrame,
+    new_matches: pd.DataFrame,
+) -> pd.DataFrame:
+    """Carry Elo forward through new_matches, starting from the end-state of base_results.
+
+    Returns new_matches with elo_home_pre, elo_away_pre, elo_diff columns added.
+    new_matches must already have: date, home_team, away_team, home_score, away_score,
+    neutral, tournament (needed for home-advantage and K-factor in the Elo pass).
+    """
+    keep = ["date", "home_team", "away_team", "home_score", "away_score", "neutral", "tournament"]
+    n_new = len(new_matches)
+
+    new_slim = new_matches[keep].reset_index(drop=True)
+    base_tagged = base_results[keep].assign(_src=0)
+    new_tagged = new_slim.assign(_src=range(1, n_new + 1))
+
+    combined = (
+        pd.concat([base_tagged, new_tagged], ignore_index=True)
+        .sort_values("date", kind="stable")
+        .reset_index(drop=True)
+    )
+
+    _, elo_h_all, elo_a_all = _run_elo_pass(combined[keep], record_pre=True)
+    combined["_elo_h"] = elo_h_all
+    combined["_elo_a"] = elo_a_all
+
+    new_rows = combined[combined["_src"] > 0].sort_values("_src")
+    out = new_matches.copy().reset_index(drop=True)
+    out["elo_home_pre"] = new_rows["_elo_h"].values
+    out["elo_away_pre"] = new_rows["_elo_a"].values
+    out["elo_diff"] = out["elo_home_pre"] - out["elo_away_pre"]
+    return out

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -316,6 +317,47 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
 
 
 # ---------------------------------------------------------------------------
+# Odds snapshot (persists pre-match market odds for later validation)
+# ---------------------------------------------------------------------------
+
+_ODDS_SNAPSHOT_PATH: Path = Path("data/raw/wc2026_odds_snapshot.json")
+
+
+def _save_odds_snapshot(live_odds: list[dict]) -> None:
+    """Merge new live odds into the on-disk snapshot (upsert by team pair).
+
+    Keyed by (normalised_home, normalised_away) so repeated runs before the
+    same match update rather than duplicate.  Silently swallows write errors.
+    """
+    existing: list[dict] = []
+    if _ODDS_SNAPSHOT_PATH.exists():
+        try:
+            with _ODDS_SNAPSHOT_PATH.open() as f:
+                existing = json.load(f)
+        except Exception:
+            existing = []
+
+    index: dict[tuple[str, str], dict] = {
+        (_normalise_odds_name(e["home_team"]), _normalise_odds_name(e["away_team"])): e
+        for e in existing
+    }
+    for entry in live_odds:
+        key = (_normalise_odds_name(entry["home_team"]), _normalise_odds_name(entry["away_team"]))
+        index[key] = entry  # upsert
+
+    try:
+        _ODDS_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _ODDS_SNAPSHOT_PATH.open("w") as f:
+            json.dump(list(index.values()), f, indent=2, default=str)
+        typer.echo(
+            f"[wc2026] Odds snapshot updated ({len(index)} entries) → {_ODDS_SNAPSHOT_PATH}",
+            err=True,
+        )
+    except Exception as exc:
+        typer.echo(f"[wc2026] WARNING: could not save odds snapshot — {exc}", err=True)
+
+
+# ---------------------------------------------------------------------------
 # Main command
 # ---------------------------------------------------------------------------
 
@@ -468,6 +510,8 @@ def main(
     if has_api_key:
         typer.echo("Fetching live odds from the-odds-api.com...", err=True)
         live_odds = fetch_upcoming_odds()
+        if live_odds:
+            _save_odds_snapshot(live_odds)
     else:
         typer.echo(
             "THE_ODDS_API_KEY not set — showing model probabilities only (no market comparison).",

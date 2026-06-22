@@ -332,7 +332,7 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
 # Odds snapshot (persists pre-match market odds for later validation)
 # ---------------------------------------------------------------------------
 
-_ODDS_SNAPSHOT_PATH: Path = Path("data/raw/wc2026_odds_snapshot.json")
+_ODDS_SNAPSHOT_PATH: Path = Path("data/cache/wc2026_odds_snapshot.json")
 
 
 def _save_odds_snapshot(live_odds: list[dict]) -> None:

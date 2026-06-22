@@ -32,7 +32,7 @@ _BASE_URL = "https://v3.football.api-sports.io"
 _WC_LEAGUE_ID = 1
 _WC_SEASON = 2026
 _TIMEOUT = 20
-_CACHE_DIR = Path("data/raw")
+_CACHE_DIR = Path("data/cache")
 
 
 def _today_cache_path() -> Path:

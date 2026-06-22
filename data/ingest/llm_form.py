@@ -44,7 +44,7 @@ from pathlib import Path
 
 _OLLAMA_BASE = "http://localhost:11434"
 _OLLAMA_TIMEOUT = 45  # seconds — allow for cold model load
-_CACHE_DIR = Path("data/raw")
+_CACHE_DIR = Path("data/cache")
 _BBC_WC_RSS = "https://feeds.bbci.co.uk/sport/football/world-cup/rss.xml"
 _BBC_SPORT_RSS = "https://feeds.bbci.co.uk/sport/football/rss.xml"
 _MAX_COMBINED_CHARS = 2500

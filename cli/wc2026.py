@@ -159,8 +159,8 @@ def _build_upcoming_match_df(
             feats_h = squad_registry.get_features(home, 2026, "FIFA World Cup")
             feats_a = squad_registry.get_features(away, 2026, "FIFA World Cup")
         else:
-            feats_h = {"top5_share": 0.0, "avg_caps_norm": 0.0}
-            feats_a = {"top5_share": 0.0, "avg_caps_norm": 0.0}
+            feats_h = {"top5_share": 0.0, "avg_caps_norm": 0.0, "intl_goals_per_cap": 0.0}
+            feats_a = {"top5_share": 0.0, "avg_caps_norm": 0.0, "intl_goals_per_cap": 0.0}
 
         rows.append(
             {
@@ -187,6 +187,8 @@ def _build_upcoming_match_df(
                 "squad_top5_away": feats_a["top5_share"],
                 "squad_caps_home": feats_h["avg_caps_norm"],
                 "squad_caps_away": feats_a["avg_caps_norm"],
+                "squad_goals_home": feats_h["intl_goals_per_cap"],
+                "squad_goals_away": feats_a["intl_goals_per_cap"],
             }
         )
 
@@ -449,7 +451,14 @@ def main(
             completed["rest_days_home"] = 7.0
             completed["rest_days_away"] = 7.0
             completed["sample_weight"] = 1.0
-            for col in ["squad_top5_home", "squad_top5_away", "squad_caps_home", "squad_caps_away"]:
+            for col in [
+                "squad_top5_home",
+                "squad_top5_away",
+                "squad_caps_home",
+                "squad_caps_away",
+                "squad_goals_home",
+                "squad_goals_away",
+            ]:
                 completed[col] = 0.0
             for i, wc_row in completed.iterrows():
                 fh = registry.get_features(wc_row["home_team"], 2026, "FIFA World Cup")
@@ -458,6 +467,8 @@ def main(
                 completed.at[i, "squad_top5_away"] = fa["top5_share"]
                 completed.at[i, "squad_caps_home"] = fh["avg_caps_norm"]
                 completed.at[i, "squad_caps_away"] = fa["avg_caps_norm"]
+                completed.at[i, "squad_goals_home"] = fh["intl_goals_per_cap"]
+                completed.at[i, "squad_goals_away"] = fa["intl_goals_per_cap"]
             results = (
                 pd.concat([results, completed], ignore_index=True)
                 .sort_values("date")

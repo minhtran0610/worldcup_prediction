@@ -15,7 +15,7 @@ from models.grid import build_grid, derive_markets
 
 EMBED_DIM: int = 32
 GRU_HIDDEN: int = 32
-CONTEXT_DIM: int = 11
+CONTEXT_DIM: int = 13
 
 # Clip floor for NLL loss to prevent log(0)
 _LOG_CLIP: float = 1e-10
@@ -67,7 +67,7 @@ class ScoreGridNet(nn.Module):
         away_idx: torch.Tensor,  # (batch,) long
         home_seq: torch.Tensor,  # (batch, FORM_N, 5) float
         away_seq: torch.Tensor,  # (batch, FORM_N, 5) float
-        context: torch.Tensor,  # (batch, 11) float
+        context: torch.Tensor,  # (batch, 13) float
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return (lambda_home, lambda_away, rho) each shape (batch,)."""
         home_emb = self.team_embed(home_idx)  # (batch, 32)
@@ -95,7 +95,7 @@ def _build_context_tensor(
     rows: pd.DataFrame,
     device: torch.device,
 ) -> torch.Tensor:
-    """Construct the (N, 11) normalised context tensor from a DataFrame slice.
+    """Construct the (N, 13) normalised context tensor from a DataFrame slice.
 
     Features (in order):
         0:  neutral (float)
@@ -109,6 +109,8 @@ def _build_context_tensor(
         8:  squad_top5_away (float)
         9:  squad_caps_home (float, avg caps / 100; default 0.0)
         10: squad_caps_away (float)
+        11: squad_goals_home (float, career intl goals / total squad caps; default 0.0)
+        12: squad_goals_away (float)
     """
     neutral = rows["neutral"].to_numpy(dtype=np.float32)
     rest_h = rows["rest_days_home"].fillna(0.0).to_numpy(dtype=np.float32) / 180.0
@@ -119,26 +121,12 @@ def _build_context_tensor(
     is_ha = rows["is_host_away"].to_numpy(dtype=np.float32)
 
     # Squad features — present when registry was used in derive_context; otherwise 0.0
-    sq_top5_h = (
-        rows["squad_top5_home"].fillna(0.0).to_numpy(dtype=np.float32)
-        if "squad_top5_home" in rows.columns
-        else np.zeros(len(rows), dtype=np.float32)
-    )
-    sq_top5_a = (
-        rows["squad_top5_away"].fillna(0.0).to_numpy(dtype=np.float32)
-        if "squad_top5_away" in rows.columns
-        else np.zeros(len(rows), dtype=np.float32)
-    )
-    sq_caps_h = (
-        rows["squad_caps_home"].fillna(0.0).to_numpy(dtype=np.float32)
-        if "squad_caps_home" in rows.columns
-        else np.zeros(len(rows), dtype=np.float32)
-    )
-    sq_caps_a = (
-        rows["squad_caps_away"].fillna(0.0).to_numpy(dtype=np.float32)
-        if "squad_caps_away" in rows.columns
-        else np.zeros(len(rows), dtype=np.float32)
-    )
+    def _sq(col: str) -> np.ndarray:
+        return (
+            rows[col].fillna(0.0).to_numpy(dtype=np.float32)
+            if col in rows.columns
+            else np.zeros(len(rows), dtype=np.float32)
+        )
 
     arr = np.stack(
         [
@@ -149,10 +137,12 @@ def _build_context_tensor(
             is_ko,
             is_hh,
             is_ha,
-            sq_top5_h,
-            sq_top5_a,
-            sq_caps_h,
-            sq_caps_a,
+            _sq("squad_top5_home"),
+            _sq("squad_top5_away"),
+            _sq("squad_caps_home"),
+            _sq("squad_caps_away"),
+            _sq("squad_goals_home"),
+            _sq("squad_goals_away"),
         ],
         axis=1,
     )

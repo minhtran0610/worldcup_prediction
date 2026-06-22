@@ -63,12 +63,16 @@ def derive_context(
     out["squad_top5_away"] = 0.0
     out["squad_caps_home"] = 0.0
     out["squad_caps_away"] = 0.0
+    out["squad_goals_home"] = 0.0
+    out["squad_goals_away"] = 0.0
 
     if squad_registry is not None:
         top5_home_vals: list[float] = []
         top5_away_vals: list[float] = []
         caps_home_vals: list[float] = []
         caps_away_vals: list[float] = []
+        goals_home_vals: list[float] = []
+        goals_away_vals: list[float] = []
 
         for row in out.itertuples(index=False):
             year: int = int(row.date.year)
@@ -81,10 +85,14 @@ def derive_context(
             top5_away_vals.append(feats_a["top5_share"])
             caps_home_vals.append(feats_h["avg_caps_norm"])
             caps_away_vals.append(feats_a["avg_caps_norm"])
+            goals_home_vals.append(feats_h["intl_goals_per_cap"])
+            goals_away_vals.append(feats_a["intl_goals_per_cap"])
 
         out["squad_top5_home"] = top5_home_vals
         out["squad_top5_away"] = top5_away_vals
         out["squad_caps_home"] = caps_home_vals
         out["squad_caps_away"] = caps_away_vals
+        out["squad_goals_home"] = goals_home_vals
+        out["squad_goals_away"] = goals_away_vals
 
     return out

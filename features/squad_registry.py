@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 
 import pandas as pd
 
@@ -199,6 +201,15 @@ BIG5_CLUBS: frozenset[str] = frozenset(
 )
 
 
+def _nfc_strip(name: str) -> str:
+    """NFC-normalise, lowercase, and strip parenthetical annotations from a player name.
+
+    Handles cases like 'Harry Kane (captain)' → 'harry kane'.
+    """
+    clean = re.sub(r"\s*\([^)]*\)", "", str(name)).strip()
+    return unicodedata.normalize("NFC", clean.lower())
+
+
 def _resolve_tournament_key(tournament: str, year: int) -> str | None:
     """Return tournament_key for a (tournament fragment, year) pair, or None if not found."""
     for fragment, t_year, key in TOURNAMENT_KEY_MAP:
@@ -242,29 +253,46 @@ class SquadRegistry:
                 )
 
     def _compute_features(self, tournament_key: str, df: pd.DataFrame) -> None:
-        """Compute top5_share and avg_caps_norm per team and store in _features."""
+        """Compute top5_share, avg_caps_norm, intl_goals_per_cap per team."""
+        from data.ingest.goalscorers import load_player_goals
+
         has_caps = "caps" in df.columns
+        player_goals = load_player_goals()
 
         for team, group in df.groupby("team"):
             n_squad = len(group)
             if n_squad == 0:
                 top5_share = 0.0
                 avg_caps_norm = 0.0
+                intl_goals_per_cap = 0.0
             else:
-                # top5_share: fraction of players whose club is in BIG5_CLUBS
                 top5_count = group["club"].apply(lambda c: c in BIG5_CLUBS).sum()
                 top5_share = float(top5_count) / n_squad
 
-                # avg_caps_norm: mean caps / 100
                 if has_caps:
                     caps_vals = pd.to_numeric(group["caps"], errors="coerce").fillna(0.0)
                     avg_caps_norm = float(caps_vals.mean()) / 100.0
+                    total_caps = float(caps_vals.sum())
                 else:
                     avg_caps_norm = 0.0
+                    total_caps = 0.0
+
+                # intl_goals_per_cap: squad's aggregate career goals / total squad caps.
+                # Normalised by total caps so squad size and caps-heavy players don't
+                # distort the signal — a 26-player squad with Kane (60+ goals) scores
+                # ~0.10-0.20; a weaker squad scores ~0.02-0.05.
+                if total_caps > 0:
+                    squad_goals = sum(
+                        player_goals.get(_nfc_strip(name), 0) for name in group["player_name"]
+                    )
+                    intl_goals_per_cap = squad_goals / total_caps
+                else:
+                    intl_goals_per_cap = 0.0
 
             self._features[(tournament_key, str(team))] = {
                 "top5_share": top5_share,
                 "avg_caps_norm": avg_caps_norm,
+                "intl_goals_per_cap": intl_goals_per_cap,
             }
 
     def get_features(self, team: str, year: int, tournament: str) -> dict[str, float]:
@@ -272,7 +300,11 @@ class SquadRegistry:
 
         Returns zeros if the tournament/team is not found in the registry.
         """
-        _default: dict[str, float] = {"top5_share": 0.0, "avg_caps_norm": 0.0}
+        _default: dict[str, float] = {
+            "top5_share": 0.0,
+            "avg_caps_norm": 0.0,
+            "intl_goals_per_cap": 0.0,
+        }
 
         tournament_key = _resolve_tournament_key(tournament, year)
         if tournament_key is None:

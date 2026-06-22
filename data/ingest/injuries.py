@@ -10,19 +10,14 @@ dict[str, list[str]]
     Only includes players with type "Injury" or "Suspension" (i.e. confirmed OUT or doubtful).
     Empty dict on total failure — callers treat missing data as zero injury loss.
 
-Cache
------
-data/raw/wc2026_injuries_YYYY-MM-DD.json  (one file per calendar day, UTC)
-Pass force_refresh=True to bypass the cache and re-fetch.
+Always fetches fresh — no cache. Injury and suspension status changes intra-day.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 
 import requests
 
@@ -32,12 +27,6 @@ _BASE_URL = "https://v3.football.api-sports.io"
 _WC_LEAGUE_ID = 1
 _WC_SEASON = 2026
 _TIMEOUT = 20
-_CACHE_DIR = Path("data/cache")
-
-
-def _today_cache_path() -> Path:
-    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-    return _CACHE_DIR / f"wc2026_injuries_{today}.json"
 
 
 def _normalise_team(name: str) -> str:
@@ -263,45 +252,23 @@ def _fetch_transfermarkt(teams: list[str]) -> dict[str, list[str]]:
 
 
 def fetch_wc2026_injuries(
-    force_refresh: bool = False,
     teams: list[str] | None = None,
 ) -> dict[str, list[str]]:
     """Return upcoming WC 2026 injury/suspension data as {team: [player_names]}.
 
     Parameters
     ----------
-    force_refresh:
-        Bypass the daily cache and re-fetch from source.
     teams:
         If provided, only return (and scrape) these teams. Useful for targeted
         pre-match fetches. Ignored when using API-Football (returns all teams).
 
     Source priority
     ---------------
-    1. Daily cache  (skipped if force_refresh=True)
-    2. API-Football /injuries  (requires API_FOOTBALL_KEY env var)
-    3. Transfermarkt scrape   (best-effort; only for teams in _TM_TEAMS)
+    1. API-Football /injuries  (requires API_FOOTBALL_KEY env var)
+    2. Transfermarkt scrape   (best-effort; only for teams in _TM_TEAMS)
 
     Returns empty dict on complete failure — callers treat this as no injuries known.
     """
-    cache_path = _today_cache_path()
-
-    if not force_refresh and cache_path.exists():
-        try:
-            with cache_path.open() as f:
-                data: dict[str, list[str]] = json.load(f)
-            n = sum(len(v) for v in data.values())
-            print(
-                f"[injuries] Cache HIT ({cache_path.name}): "
-                f"{n} absent player(s) across {len(data)} team(s).",
-                file=sys.stderr,
-            )
-            if teams:
-                return {t: data[t] for t in teams if t in data}
-            return data
-        except Exception as exc:
-            print(f"[injuries] Cache read failed: {exc} — re-fetching.", file=sys.stderr)
-
     # Primary: API-Football
     result = _fetch_api_football()
 
@@ -313,15 +280,6 @@ def fetch_wc2026_injuries(
 
     if result is None:
         result = {}
-
-    # Save to daily cache
-    try:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with cache_path.open("w") as f:
-            json.dump(result, f, indent=2)
-        print(f"[injuries] Cached to {cache_path.name}.", file=sys.stderr)
-    except Exception as exc:
-        print(f"[injuries] WARNING: could not write cache: {exc}", file=sys.stderr)
 
     if teams:
         return {t: result[t] for t in teams if t in result}

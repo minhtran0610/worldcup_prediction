@@ -14,7 +14,9 @@ Pipeline per team
 4. Concatenate + truncate to 2500 chars
 5. POST to Ollama /api/chat with extraction prompt
 6. Parse + validate JSON → FormAnalysis
-7. Cache to data/cache/llm_form_{team}_{YYYY-MM-DD}.json
+
+Always fetches fresh — no cache. News updates throughout the day and the model
+runs once per day before each match batch.
 
 Fallback behaviour
 ------------------
@@ -39,12 +41,9 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from pathlib import Path
 
 _OLLAMA_BASE = "http://localhost:11434"
 _OLLAMA_TIMEOUT = 45  # seconds — allow for cold model load
-_CACHE_DIR = Path("data/cache")
 _BBC_WC_RSS = "https://feeds.bbci.co.uk/sport/football/world-cup/rss.xml"
 _BBC_SPORT_RSS = "https://feeds.bbci.co.uk/sport/football/rss.xml"
 _GUARDIAN_WC_RSS = "https://www.theguardian.com/football/world-cup-2026/rss"
@@ -147,15 +146,6 @@ class FormAnalysis:
     @classmethod
     def neutral(cls, team: str, reason: str = "") -> FormAnalysis:
         return cls(team=team, error=reason or None)
-
-
-# ── Cache helpers ─────────────────────────────────────────────────────────────
-
-
-def _today_cache_path(team: str) -> Path:
-    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-    safe = re.sub(r"[^\w]", "_", team.lower().strip())
-    return _CACHE_DIR / f"llm_form_{safe}_{today}.json"
 
 
 # ── RSS + article fetch ───────────────────────────────────────────────────────
@@ -441,68 +431,38 @@ def analyse_team_form(
     return analysis
 
 
-# ── High-level cached entry point ─────────────────────────────────────────────
+# ── High-level entry point ────────────────────────────────────────────────────
 
 
 def get_team_form_analysis(
     team: str,
-    force_refresh: bool = False,
     model: str = DEFAULT_MODEL,
     max_articles: int = 3,
 ) -> FormAnalysis:
-    """Fetch news, run LLM extraction, return cached FormAnalysis.
+    """Fetch news and run LLM extraction for one team.
 
-    Cache is per-team per-calendar-day (UTC). Re-running within the same day
-    returns the cached result without making any network or LLM calls.
-    Pass force_refresh=True to bypass.
-
+    Always fetches fresh — no cache. News changes throughout the day.
     Always returns a valid FormAnalysis — never raises. Degrades to
     form_score=0.0 / confidence=0.0 on any failure.
     """
-    cache_path = _today_cache_path(team)
-
-    if not force_refresh and cache_path.exists():
-        try:
-            with cache_path.open() as f:
-                data = json.load(f)
-            analysis = FormAnalysis.from_dict(data)
-            print(
-                f"[llm_form] Cache HIT {team!r}: "
-                f"form={analysis.form_score:+.2f}, conf={analysis.confidence:.2f}",
-                file=sys.stderr,
-            )
-            return analysis
-        except Exception as exc:
-            print(f"[llm_form] Cache read failed for {team!r}: {exc}", file=sys.stderr)
-
     print(f"[llm_form] Fetching news for {team!r}...", file=sys.stderr)
     texts, urls = fetch_team_news(team, max_articles=max_articles)
 
     if not texts:
         print(f"[llm_form] No articles found for {team!r} — returning neutral.", file=sys.stderr)
-        analysis = FormAnalysis.neutral(team)
-    else:
-        print(
-            f"[llm_form] {team!r}: {len(texts)} article(s) → running {model}...",
-            file=sys.stderr,
-        )
-        analysis = analyse_team_form(team, texts, urls=urls, model=model)
-        analysis.n_articles = len(texts)
+        return FormAnalysis.neutral(team)
 
-    # Cache result
-    try:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with cache_path.open("w") as f:
-            json.dump(analysis.to_dict(), f, indent=2)
-    except Exception as exc:
-        print(f"[llm_form] WARNING: could not write cache for {team!r}: {exc}", file=sys.stderr)
-
+    print(
+        f"[llm_form] {team!r}: {len(texts)} article(s) → running {model}...",
+        file=sys.stderr,
+    )
+    analysis = analyse_team_form(team, texts, urls=urls, model=model)
+    analysis.n_articles = len(texts)
     return analysis
 
 
 def get_all_teams_form(
     teams: list[str],
-    force_refresh: bool = False,
     model: str = DEFAULT_MODEL,
 ) -> dict[str, FormAnalysis]:
     """Run form analysis for a list of teams, returning {team: FormAnalysis}.
@@ -510,7 +470,4 @@ def get_all_teams_form(
     Teams are processed sequentially (Ollama serialises GPU inference anyway).
     HTTP article fetches within each team are parallelised.
     """
-    results: dict[str, FormAnalysis] = {}
-    for team in teams:
-        results[team] = get_team_form_analysis(team, force_refresh=force_refresh, model=model)
-    return results
+    return {team: get_team_form_analysis(team, model=model) for team in teams}

@@ -6,8 +6,6 @@ TOP5_LEAGUES: frozenset[str] = frozenset(
     {"Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1"}
 )
 
-SQUAD_FEATURES_CACHE_KEY: str = "squad_features"
-
 
 def _nfc(name: str) -> str:
     return unicodedata.normalize("NFC", name.strip().lower())

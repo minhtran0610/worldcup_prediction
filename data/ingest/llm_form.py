@@ -1,4 +1,4 @@
-"""Fetch recent BBC Sport WC news and extract structured team form signals via Ollama.
+"""Fetch recent WC news (BBC + The Guardian) and extract structured team form signals via Ollama.
 
 Architecture
 ------------
@@ -8,13 +8,13 @@ layer in features/llm_form_feature.py, which trims the neural model's Poisson ra
 
 Pipeline per team
 -----------------
-1. Fetch BBC WC RSS feed  (one HTTP call, shared across all teams)
+1. Fetch RSS feeds (BBC WC, BBC Sport, Guardian WC)  (one HTTP call each, shared)
 2. Filter items by team name keywords in title + description
 3. Fetch full article body for matched items  (parallel HTTP)
 4. Concatenate + truncate to 2500 chars
 5. POST to Ollama /api/chat with extraction prompt
 6. Parse + validate JSON → FormAnalysis
-7. Cache to data/raw/llm_form_{team}_{YYYY-MM-DD}.json
+7. Cache to data/cache/llm_form_{team}_{YYYY-MM-DD}.json
 
 Fallback behaviour
 ------------------
@@ -47,6 +47,8 @@ _OLLAMA_TIMEOUT = 45  # seconds — allow for cold model load
 _CACHE_DIR = Path("data/cache")
 _BBC_WC_RSS = "https://feeds.bbci.co.uk/sport/football/world-cup/rss.xml"
 _BBC_SPORT_RSS = "https://feeds.bbci.co.uk/sport/football/rss.xml"
+_GUARDIAN_WC_RSS = "https://www.theguardian.com/football/world-cup-2026/rss"
+_GUARDIAN_FOOTBALL_RSS = "https://www.theguardian.com/football/rss"
 _MAX_COMBINED_CHARS = 2500
 _ARTICLE_FETCH_WORKERS = 4
 
@@ -191,9 +193,12 @@ def _clean_html(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+_SUPPORTED_DOMAINS = ("bbc.", "theguardian.com")
+
+
 def _fetch_article_text(url: str) -> str:
-    """Fetch full body text from a BBC Sport article. Returns '' on failure."""
-    if not url or "bbc." not in url:
+    """Fetch full body text from a BBC Sport or Guardian article. Returns '' on failure."""
+    if not url or not any(d in url for d in _SUPPORTED_DOMAINS):
         return ""
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
@@ -205,7 +210,12 @@ def _fetch_article_text(url: str) -> str:
     paras = re.findall(r"<p[^>]*>(.*?)</p>", raw, re.DOTALL)
     cleaned = [_clean_html(p) for p in paras]
     cleaned = [
-        p for p in cleaned if len(p) >= 60 and not p.startswith("BBC") and "cookie" not in p.lower()
+        p
+        for p in cleaned
+        if len(p) >= 60
+        and not p.startswith("BBC")
+        and "cookie" not in p.lower()
+        and "subscribe" not in p.lower()
     ]
     return " ".join(cleaned)[:_MAX_COMBINED_CHARS]
 
@@ -222,9 +232,9 @@ def fetch_team_news(team: str, max_articles: int = 3) -> tuple[list[str], list[s
     search_terms = _SEARCH_TERMS.get(team, [team])
     search_lower = [s.lower() for s in search_terms]
 
-    # Fetch both RSS feeds (WC-specific is more relevant)
+    # Fetch all RSS feeds; WC-specific feeds listed first (more relevant)
     all_items: list[dict] = []
-    for rss_url in [_BBC_WC_RSS, _BBC_SPORT_RSS]:
+    for rss_url in [_BBC_WC_RSS, _GUARDIAN_WC_RSS, _BBC_SPORT_RSS, _GUARDIAN_FOOTBALL_RSS]:
         all_items.extend(_fetch_rss(rss_url))
 
     # Deduplicate by URL and filter to team-relevant items
@@ -246,15 +256,33 @@ def fetch_team_news(team: str, max_articles: int = 3) -> tuple[list[str], list[s
 
     urls = [m["link"] for m in matched]
 
-    # Fetch article bodies in parallel
-    texts: list[str] = []
-    with ThreadPoolExecutor(max_workers=min(_ARTICLE_FETCH_WORKERS, len(urls))) as exe:
-        future_to_url = {exe.submit(_fetch_article_text, url): url for url in urls}
-        for future in as_completed(future_to_url):
-            body = future.result()
-            if body:
-                texts.append(body)
+    urls = [m["link"] for m in matched]
+    # RSS descriptions are clean summaries; always available regardless of domain.
+    # Guardian articles render via JS so full-page scraping returns nav boilerplate —
+    # use RSS description directly for non-BBC URLs.
+    rss_descs = {m["link"]: _clean_html(m["title"] + ". " + m["description"]) for m in matched}
 
+    bbc_urls = [u for u in urls if "bbc." in u]
+    other_urls = [u for u in urls if "bbc." not in u]
+
+    texts: list[str] = []
+
+    # BBC: fetch full article body (works well with <p> extraction)
+    if bbc_urls:
+        with ThreadPoolExecutor(max_workers=min(_ARTICLE_FETCH_WORKERS, len(bbc_urls))) as exe:
+            future_to_url = {exe.submit(_fetch_article_text, url): url for url in bbc_urls}
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                body = future.result()
+                texts.append(body if len(body) >= 150 else rss_descs.get(url, ""))
+
+    # Non-BBC (Guardian etc.): use RSS description directly — it's a clean summary
+    for url in other_urls:
+        desc = rss_descs.get(url, "")
+        if desc:
+            texts.append(desc)
+
+    texts = [t for t in texts if t]
     return texts, urls
 
 
@@ -267,7 +295,8 @@ _SYSTEM_PROMPT = (
     "1. Only extract information EXPLICITLY stated in the provided text — never infer, "
     "assume, or draw on external knowledge.\n"
     "2. key_absences: only include players explicitly described as OUT, injured, suspended, "
-    "or will miss the next match. Do NOT include players described as 'doubtful', "
+    "sent off (red card = automatic one-match suspension), or will miss the next match. "
+    "Do NOT include players described as 'doubtful', "
     "'carrying a knock', 'a slight concern', 'returned to training', or similar.\n"
     "3. If the text contains no useful signal, return form_score=0.0, empty lists, "
     "and confidence at or below 0.15.\n"

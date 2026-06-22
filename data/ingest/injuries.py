@@ -33,6 +33,7 @@ _WC_LEAGUE_ID = 1
 _WC_SEASON = 2026
 _TIMEOUT = 20
 _CACHE_DIR = Path("data/cache")
+_MANUAL_ABSENCES_PATH = Path("data/cache/manual_absences.json")
 
 
 def _today_cache_path() -> Path:
@@ -259,6 +260,32 @@ def _fetch_transfermarkt(teams: list[str]) -> dict[str, list[str]]:
     return result
 
 
+# ── Manual overrides ─────────────────────────────────────────────────────────
+
+
+def _load_manual_absences() -> dict[str, list[str]]:
+    """Load data/cache/manual_absences.json if it exists.
+
+    Format: {"Paraguay": ["Miguel Almiron"], "England": ["Harry Kane"]}
+    Entries here are merged on top of scraped data — useful when TM/API-Football
+    haven't updated yet (e.g. red-card suspension just issued).
+    """
+    if not _MANUAL_ABSENCES_PATH.exists():
+        return {}
+    try:
+        with _MANUAL_ABSENCES_PATH.open() as f:
+            data = json.load(f)
+        n = sum(len(v) for v in data.values())
+        print(
+            f"[injuries] Manual absences: {n} player(s) across {len(data)} team(s).",
+            file=sys.stderr,
+        )
+        return data
+    except Exception as exc:
+        print(f"[injuries] WARNING: could not read manual_absences.json: {exc}", file=sys.stderr)
+        return {}
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -296,6 +323,11 @@ def fetch_wc2026_injuries(
                 f"{n} absent player(s) across {len(data)} team(s).",
                 file=sys.stderr,
             )
+            for team, players in _load_manual_absences().items():
+                existing = data.setdefault(team, [])
+                for p in players:
+                    if p not in existing:
+                        existing.append(p)
             if teams:
                 return {t: data[t] for t in teams if t in data}
             return data
@@ -322,6 +354,13 @@ def fetch_wc2026_injuries(
         print(f"[injuries] Cached to {cache_path.name}.", file=sys.stderr)
     except Exception as exc:
         print(f"[injuries] WARNING: could not write cache: {exc}", file=sys.stderr)
+
+    # Merge manual overrides on top (TM/API may not update immediately after red cards)
+    for team, players in _load_manual_absences().items():
+        existing = result.setdefault(team, [])
+        for p in players:
+            if p not in existing:
+                existing.append(p)
 
     if teams:
         return {t: result[t] for t in teams if t in result}

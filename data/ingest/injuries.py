@@ -135,22 +135,22 @@ _TM_TEAMS: dict[str, tuple[str, int]] = {
     "Brazil": ("brasilien", 3439),
     "Morocco": ("marokko", 3622),
     "Haiti": ("haiti", 3588),
-    "Scotland": ("schottland", 3436),
+    "Scotland": ("schottland", 3380),
     # Group D
     "United States": ("vereinigte-staaten", 3410),
     "Paraguay": ("paraguay", 3447),
     "Australia": ("australien", 4351),
-    "Turkey": ("türkei", 3383),
+    "Turkey": ("turkei", 3381),
     # Group E
     "Germany": ("deutschland", 3262),
-    "Curaçao": ("curacao", 13085),
+    "Curaçao": ("curacao", 32364),
     "Ivory Coast": ("elfenbeinküste", 3613),
     "Ecuador": ("ecuador", 3457),
     # Group F
     "Netherlands": ("niederlande", 3379),
     "Japan": ("japan", 3471),
-    "Sweden": ("schweden", 3387),
-    "Tunisia": ("tunesien", 3617),
+    "Sweden": ("schweden", 3557),
+    "Tunisia": ("tunesien", 3670),
     # Group G
     "Belgium": ("belgien", 3382),
     "Egypt": ("agypten", 3598),
@@ -158,27 +158,27 @@ _TM_TEAMS: dict[str, tuple[str, int]] = {
     "New Zealand": ("neuseeland", 4512),
     # Group H
     "Spain": ("spanien", 3375),
-    "Cape Verde": ("kap-verde", 3630),
+    "Cape Verde": ("kap-verde", 4311),
     "Saudi Arabia": ("saudi-arabien", 3512),
     "Uruguay": ("uruguay", 3448),
     # Group I
     "France": ("frankreich", 3377),
-    "Senegal": ("senegal", 3632),
+    "Senegal": ("senegal", 3499),
     "Iraq": ("irak", 3505),
     "Norway": ("norwegen", 3388),
     # Group J
     "Argentina": ("argentinien", 3409),
     "Algeria": ("algerien", 3607),
-    "Austria": ("osterreich", 3389),
+    "Austria": ("osterreich", 3383),
     "Jordan": ("jordanien", 3509),
     # Group K
     "Portugal": ("portugal", 3374),
-    "Colombia": ("kolumbien", 3453),
+    "Colombia": ("kolumbien", 3816),
     "DR Congo": ("dr-kongo", 3621),
     "Uzbekistan": ("usbekistan", 3527),
     # Group L
     "England": ("england", 3),
-    "Croatia": ("kroatien", 3099),
+    "Croatia": ("kroatien", 3556),
     "Ghana": ("ghana", 3609),
     "Panama": ("panama", 3591),
 }

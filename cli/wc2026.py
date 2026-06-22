@@ -8,6 +8,7 @@ import pandas as pd
 import typer
 
 from data.ingest.injuries import fetch_wc2026_injuries
+from data.ingest.llm_form import get_all_teams_form
 from data.ingest.odds_live import fetch_upcoming_odds, get_api_key
 from data.ingest.results import load_results
 from data.ingest.wc2026 import load_wc2026_schedule
@@ -18,6 +19,11 @@ from features.elo import compute_elo_ratings, extend_elo_through_matches, get_cu
 from features.injury import (
     apply_injury_adjustment,
     compute_injury_strength_loss,
+)
+from features.llm_form_feature import (
+    apply_sentiment_adjustment,
+    build_sentiment_report_line,
+    compute_sentiment_factor,
 )
 from features.squad_registry import SquadRegistry
 from models.grid import build_grid, derive_markets
@@ -379,6 +385,12 @@ def main(
     show_all: bool = typer.Option(False, help="Show all matches, not just value bets"),
     injuries: bool = typer.Option(True, help="Apply injury/suspension λ adjustment"),
     injury_k: float = typer.Option(0.5, help="Injury dampening coefficient K (0–1)"),
+    llm_form: bool = typer.Option(
+        False,
+        "--llm-form/--no-llm-form",
+        help="Apply LLM narrative form sentiment adjustment (~2 min)",
+    ),
+    llm_model: str = typer.Option("qwen3.5:9b", help="Ollama model for LLM form analysis"),
 ) -> None:
     """Predict all upcoming WC 2026 matches and compare vs live odds.
 
@@ -602,6 +614,84 @@ def main(
             typer.echo(f"Injury adjustment applied to {n_adjusted} match(es).", err=True)
         else:
             typer.echo("No injuries/suspensions found for upcoming matches.", err=True)
+
+    # ------------------------------------------------------------------
+    # 7c. Apply LLM narrative form adjustment (post-hoc sentiment scaling)
+    # ------------------------------------------------------------------
+    if llm_form:
+        unique_teams = sorted(
+            {t for row in upcoming.itertuples(index=False) for t in (row.home_team, row.away_team)}
+        )
+        typer.echo(
+            f"Running LLM form analysis ({llm_model}) for {len(unique_teams)} team(s)"
+            " — this may take a few minutes...",
+            err=True,
+        )
+        try:
+            form_analyses = get_all_teams_form(unique_teams, model=llm_model)
+        except ConnectionError as exc:
+            typer.echo(f"[llm-form] Ollama unreachable: {exc} — skipping.", err=True)
+            form_analyses = {}
+        except Exception as exc:
+            typer.echo(f"[llm-form] Error: {exc} — skipping.", err=True)
+            form_analyses = {}
+
+        if form_analyses:
+            typer.echo("\n[LLM Form Analysis]", err=True)
+            seen_teams: set[str] = set()
+            for uprow in upcoming.itertuples(index=False):
+                for team in (uprow.home_team, uprow.away_team):
+                    if team in seen_teams:
+                        continue
+                    seen_teams.add(team)
+                    fa = form_analyses.get(team)
+                    if fa:
+                        factor = compute_sentiment_factor(fa.form_score, fa.confidence)
+                        typer.echo(
+                            build_sentiment_report_line(
+                                team, fa.form_score, fa.confidence, fa.key_absences, factor
+                            ),
+                            err=True,
+                        )
+
+            n_sentiment = 0
+            for i, uprow in enumerate(upcoming.itertuples(index=False)):
+                home, away = uprow.home_team, uprow.away_team
+                fa_h = form_analyses.get(home)
+                fa_a = form_analyses.get(away)
+                score_h = fa_h.form_score if fa_h else 0.0
+                conf_h = fa_h.confidence if fa_h else 0.0
+                score_a = fa_a.form_score if fa_a else 0.0
+                conf_a = fa_a.confidence if fa_a else 0.0
+
+                lh = float(pred_batch["lambda_home"].iloc[i])
+                la = float(pred_batch["lambda_away"].iloc[i])
+                rho = float(pred_batch["rho"].iloc[i])
+                lh_adj, la_adj, _ = apply_sentiment_adjustment(
+                    lh, la, rho, score_h, score_a, conf_h, conf_a
+                )
+
+                if lh_adj == lh and la_adj == la:
+                    continue
+
+                grid_adj = build_grid(lh_adj, la_adj, rho)
+                markets = derive_markets(grid_adj)
+                goals = np.arange(grid_adj.shape[0], dtype=np.float64)
+
+                pred_batch.at[i, "lambda_home"] = lh_adj
+                pred_batch.at[i, "lambda_away"] = la_adj
+                pred_batch.at[i, "prob_home"] = markets["home_win"]
+                pred_batch.at[i, "prob_draw"] = markets["draw"]
+                pred_batch.at[i, "prob_away"] = markets["away_win"]
+                pred_batch.at[i, "expected_home"] = float(np.dot(goals, grid_adj.sum(axis=1)))
+                pred_batch.at[i, "expected_away"] = float(np.dot(goals, grid_adj.sum(axis=0)))
+                pred_batch.at[i, "grid"] = grid_adj
+                n_sentiment += 1
+
+            if n_sentiment:
+                typer.echo(f"Sentiment adjustment applied to {n_sentiment} match(es).", err=True)
+            else:
+                typer.echo("No sentiment signal above confidence threshold.", err=True)
 
     for i, row in enumerate(upcoming.itertuples(index=False)):
         home = row.home_team

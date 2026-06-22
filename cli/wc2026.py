@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import typer
 
+from data.ingest.injuries import fetch_wc2026_injuries
 from data.ingest.odds_live import fetch_upcoming_odds, get_api_key
 from data.ingest.results import load_results
 from data.ingest.wc2026 import load_wc2026_schedule
@@ -14,7 +15,12 @@ from eval.backtest import KELLY_FRACTION
 from eval.metrics import remove_margin
 from features.context import WC_2026_HOSTS, derive_context
 from features.elo import compute_elo_ratings, extend_elo_through_matches, get_current_ratings
+from features.injury import (
+    apply_injury_adjustment,
+    compute_injury_strength_loss,
+)
 from features.squad_registry import SquadRegistry
+from models.grid import build_grid, derive_markets
 
 app = typer.Typer()
 
@@ -371,6 +377,8 @@ def main(
     ),
     min_edge: float = typer.Option(0.02, help="Minimum edge to flag as value bet"),
     show_all: bool = typer.Option(False, help="Show all matches, not just value bets"),
+    injuries: bool = typer.Option(True, help="Apply injury/suspension λ adjustment"),
+    injury_k: float = typer.Option(0.5, help="Injury dampening coefficient K (0–1)"),
 ) -> None:
     """Predict all upcoming WC 2026 matches and compare vs live odds.
 
@@ -544,6 +552,56 @@ def main(
     sort_order = upcoming["date"].argsort(kind="stable").values
     upcoming = upcoming.iloc[sort_order].reset_index(drop=True)
     pred_batch = pred_batch.iloc[sort_order].reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # 7b. Apply injury / suspension adjustments (post-hoc λ scaling)
+    # ------------------------------------------------------------------
+    injury_data: dict[str, list[str]] = {}
+    injury_losses: dict[int, tuple[float, float]] = {}  # i -> (loss_home, loss_away)
+
+    if injuries:
+        typer.echo("Fetching injury/suspension data...", err=True)
+        injury_data = fetch_wc2026_injuries()
+        squad_df = registry._cache.get("wc2026", pd.DataFrame())
+
+        n_adjusted = 0
+        for i, uprow in enumerate(upcoming.itertuples(index=False)):
+            home, away = uprow.home_team, uprow.away_team
+            absent_home = injury_data.get(home, [])
+            absent_away = injury_data.get(away, [])
+
+            loss_h = compute_injury_strength_loss(home, absent_home, squad_df)
+            loss_a = compute_injury_strength_loss(away, absent_away, squad_df)
+            injury_losses[i] = (loss_h, loss_a)
+
+            if loss_h == 0.0 and loss_a == 0.0:
+                continue
+
+            lh = float(pred_batch["lambda_home"].iloc[i])
+            la = float(pred_batch["lambda_away"].iloc[i])
+            rho = float(pred_batch["rho"].iloc[i])
+            lh_adj, la_adj, rho_adj = apply_injury_adjustment(
+                lh, la, rho, loss_h, loss_a, k=injury_k
+            )
+
+            grid_adj = build_grid(lh_adj, la_adj, rho_adj)
+            markets = derive_markets(grid_adj)
+            goals = np.arange(grid_adj.shape[0], dtype=np.float64)
+
+            pred_batch.at[i, "lambda_home"] = lh_adj
+            pred_batch.at[i, "lambda_away"] = la_adj
+            pred_batch.at[i, "prob_home"] = markets["home_win"]
+            pred_batch.at[i, "prob_draw"] = markets["draw"]
+            pred_batch.at[i, "prob_away"] = markets["away_win"]
+            pred_batch.at[i, "expected_home"] = float(np.dot(goals, grid_adj.sum(axis=1)))
+            pred_batch.at[i, "expected_away"] = float(np.dot(goals, grid_adj.sum(axis=0)))
+            pred_batch.at[i, "grid"] = grid_adj
+            n_adjusted += 1
+
+        if n_adjusted:
+            typer.echo(f"Injury adjustment applied to {n_adjusted} match(es).", err=True)
+        else:
+            typer.echo("No injuries/suspensions found for upcoming matches.", err=True)
 
     for i, row in enumerate(upcoming.itertuples(index=False)):
         home = row.home_team

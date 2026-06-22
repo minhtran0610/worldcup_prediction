@@ -120,6 +120,7 @@ class FormAnalysis:
     key_absences: list[str] = field(default_factory=list)
     morale_signals: list[str] = field(default_factory=list)
     tactical_notes: str = ""
+    performance_context: str = ""  # narrative of recent performance quality / momentum
     confidence: float = 0.0  # [0, 1]  signal richness
     sources: list[str] = field(default_factory=list)
     n_articles: int = 0
@@ -132,6 +133,7 @@ class FormAnalysis:
             "key_absences": self.key_absences,
             "morale_signals": self.morale_signals,
             "tactical_notes": self.tactical_notes,
+            "performance_context": self.performance_context,
             "confidence": self.confidence,
             "sources": self.sources,
             "n_articles": self.n_articles,
@@ -290,17 +292,25 @@ def fetch_team_news(team: str, max_articles: int = 3) -> tuple[list[str], list[s
 
 _SYSTEM_PROMPT = (
     "You are a structured data extractor for football analytics. Your task is to "
-    "analyse recent news text about a national football team and extract specific signals.\n\n"
+    "analyse recent news text about a national football team and extract two kinds of signal: "
+    "(a) how the team has been performing and what the narrative around them is, and "
+    "(b) confirmed player absences for their next match.\n\n"
     "STRICT RULES:\n"
     "1. Only extract information EXPLICITLY stated in the provided text — never infer, "
     "assume, or draw on external knowledge.\n"
-    "2. key_absences: only include players explicitly described as OUT, injured, suspended, "
+    "2. performance_context: summarise in 1-3 sentences the team's recent form narrative — "
+    "e.g. dominant wins, poor performances, tactical improvements, scoring/defensive issues, "
+    "player form, press/public perception, tournament momentum. Leave empty if nothing is stated.\n"
+    "3. form_score [-1, 1]: reflect the OVERALL sentiment — factor in performance quality, "
+    "momentum, key absences, and morale together. Positive = strong form / confident narrative; "
+    "negative = poor performances / internal issues / key players missing; 0 = neutral/unclear.\n"
+    "4. key_absences: only include players explicitly described as OUT, injured, suspended, "
     "sent off (red card = automatic one-match suspension), or will miss the next match. "
-    "Do NOT include players described as 'doubtful', "
-    "'carrying a knock', 'a slight concern', 'returned to training', or similar.\n"
-    "3. If the text contains no useful signal, return form_score=0.0, empty lists, "
+    "Do NOT include players described as 'doubtful', 'carrying a knock', "
+    "'a slight concern', 'returned to training', or similar.\n"
+    "5. If the text contains no useful signal, return form_score=0.0, empty lists/strings, "
     "and confidence at or below 0.15.\n"
-    "4. You MUST output valid JSON matching the exact schema — no markdown fences, "
+    "6. You MUST output valid JSON matching the exact schema — no markdown fences, "
     "no explanation, no text outside the JSON object."
 )
 
@@ -311,11 +321,15 @@ _USER_TEMPLATE = (
     "in key_absences, do not score the opponent's morale, do not mix up the two sides.\n\n"
     "TEXT:\n{text}\n\n"
     "Return JSON with EXACTLY this schema (no extra keys):\n"
-    '{{"form_score": <float -1.0 to 1.0: positive=confident/winning/key players fit, '
-    "negative=poor form/morale issues/key absences, 0.0=unclear>, "
+    '{{"form_score": <float -1.0 to 1.0: overall narrative sentiment for {team} — '
+    "factor in performance quality, momentum, morale, and absences together>, "
+    '"performance_context": "<string: 1-3 sentence summary of {team}\'s recent performance '
+    "narrative — results, style of play, scoring/defensive trends, press perception, "
+    'tournament momentum — empty string if nothing stated>", '
     '"key_absences": [<strings: names of {team} players confirmed absent for their NEXT match — '
-    "never list players from the opposing team>, "
-    '"morale_signals": [<strings: direct short phrases from text indicating {team} morale>], '
+    "never list players from the opposing team>], "
+    '"morale_signals": [<strings: direct short phrases from text indicating {team} morale or '
+    "team atmosphere>], "
     '"tactical_notes": "<string: {team} tactical changes or coach statements, empty if none>", '
     '"confidence": <float 0.0 to 1.0: 0=team barely mentioned, 1=rich pre-match report>}}'
 )
@@ -380,6 +394,7 @@ def _validate_raw(raw: dict, team: str) -> FormAnalysis:
     absences = [str(p) for p in raw.get("key_absences", []) if p]
     signals = [str(s) for s in raw.get("morale_signals", []) if s]
     notes = str(raw.get("tactical_notes", "")).strip()
+    perf_ctx = str(raw.get("performance_context", "")).strip()
 
     return FormAnalysis(
         team=team,
@@ -387,6 +402,7 @@ def _validate_raw(raw: dict, team: str) -> FormAnalysis:
         key_absences=absences,
         morale_signals=signals,
         tactical_notes=notes,
+        performance_context=perf_ctx,
         confidence=confidence,
     )
 

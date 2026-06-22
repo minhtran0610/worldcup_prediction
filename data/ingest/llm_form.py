@@ -277,13 +277,17 @@ _SYSTEM_PROMPT = (
 
 _USER_TEMPLATE = (
     "Analyse the following recent news text about {team} and extract structured form signals.\n\n"
+    "CRITICAL: You are ONLY extracting data for {team}. If the article covers a match between "
+    "{team} and an opponent, ignore the opponent entirely — do not list any opponent players "
+    "in key_absences, do not score the opponent's morale, do not mix up the two sides.\n\n"
     "TEXT:\n{text}\n\n"
     "Return JSON with EXACTLY this schema (no extra keys):\n"
     '{{"form_score": <float -1.0 to 1.0: positive=confident/winning/key players fit, '
     "negative=poor form/morale issues/key absences, 0.0=unclear>, "
-    '"key_absences": [<strings: player names confirmed absent for their next match>], '
-    '"morale_signals": [<strings: direct short phrases from text indicating morale>], '
-    '"tactical_notes": "<string: tactical changes or coach statements, empty if none>", '
+    '"key_absences": [<strings: names of {team} players confirmed absent for their NEXT match — '
+    "never list players from the opposing team>, "
+    '"morale_signals": [<strings: direct short phrases from text indicating {team} morale>], '
+    '"tactical_notes": "<string: {team} tactical changes or coach statements, empty if none>", '
     '"confidence": <float 0.0 to 1.0: 0=team barely mentioned, 1=rich pre-match report>}}'
 )
 

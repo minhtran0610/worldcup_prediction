@@ -135,7 +135,7 @@ _TM_TEAMS: dict[str, tuple[str, int]] = {
     "Brazil": ("brasilien", 3439),
     "Morocco": ("marokko", 3622),
     "Haiti": ("haiti", 3588),
-    "Scotland": ("schottland", 3377),  # placeholder — verify
+    "Scotland": ("schottland", 3436),
     # Group D
     "United States": ("vereinigte-staaten", 3410),
     "Paraguay": ("paraguay", 3447),
@@ -167,7 +167,7 @@ _TM_TEAMS: dict[str, tuple[str, int]] = {
     "Iraq": ("irak", 3505),
     "Norway": ("norwegen", 3388),
     # Group J
-    "Argentina": ("argentinien", 3437),  # TM id 3437 is Mexico — fix
+    "Argentina": ("argentinien", 3409),
     "Algeria": ("algerien", 3607),
     "Austria": ("osterreich", 3389),
     "Jordan": ("jordanien", 3509),
@@ -214,6 +214,12 @@ def _fetch_transfermarkt_team(team: str) -> list[str]:
     try:
         resp = requests.get(url, headers=_TM_HEADERS, timeout=_TIMEOUT)
         resp.raise_for_status()
+    except requests.exceptions.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            # Page doesn't exist for this team — not a runtime error, skip silently
+            return []
+        print(f"[injuries] TM request failed for {team!r}: {exc}", file=sys.stderr)
+        return []
     except requests.exceptions.RequestException as exc:
         print(f"[injuries] TM request failed for {team!r}: {exc}", file=sys.stderr)
         return []

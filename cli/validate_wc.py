@@ -35,7 +35,7 @@ from features.squad_registry import SquadRegistry
 
 app = typer.Typer()
 
-ODDS_SNAPSHOT_PATH = Path("data/raw/wc2026_odds_snapshot.json")
+ODDS_SNAPSHOT_PATH = Path("data/cache/wc2026_odds_snapshot.json")
 
 # ── Column widths ────────────────────────────────────────────────────────────
 _W_MATCH = 30

@@ -1,4 +1,7 @@
 data/raw/
+data/cache/
+checkpoints/
+.claude/worktrees/
 __pycache__/
 *.pyc
 *.pyo

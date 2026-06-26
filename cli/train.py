@@ -20,12 +20,18 @@ app = typer.Typer()
 def main(
     csv_path: Path | None = typer.Option(None, help="Path to Kaggle results CSV"),
     checkpoint: Path = typer.Option(
-        Path("data/raw/neural_checkpoint.pt"), help="Where to save checkpoint"
+        Path("checkpoints/neural_v2.pt"), help="Where to save checkpoint"
     ),
     n_epochs: int = typer.Option(150, help="Maximum training epochs"),
     lr: float = typer.Option(3e-4, help="Adam learning rate"),
     val_months: int = typer.Option(6, help="Hold-out validation months at end of data"),
     tournament_filter: str | None = typer.Option(None, help="Filter to specific tournament"),
+    no_holdout: bool = typer.Option(
+        False,
+        "--no-holdout/--holdout",
+        help="Production refit: after the holdout run reports Val RPS, retrain on ALL "
+        "data for the best epoch count (no held-out validation).",
+    ),
 ) -> None:
     # 1. Load and enrich results
     try:
@@ -72,7 +78,7 @@ def main(
         err=True,
     )
 
-    # 3. Train the neural model
+    # 3. Train the neural model (holdout run — honest early-stopping + Val RPS)
     model = NeuralModel(n_epochs=n_epochs, lr=lr, checkpoint_path=str(checkpoint))
     model.fit(
         train_results=train_df,
@@ -98,5 +104,18 @@ def main(
         typer.echo("No validation data; skipping RPS report.")
 
     # 5. Save checkpoint
-    model.save(checkpoint)
-    typer.echo(f"Checkpoint saved to {checkpoint}")
+    if no_holdout:
+        # Production refit: retrain a fresh model on ALL data (train + val) for the
+        # epoch count the holdout run selected, with early stopping off.
+        best_epoch = model.best_epoch_ or n_epochs
+        typer.echo(
+            f"Final refit on all {len(results)} matches for {best_epoch} epochs (no holdout)...",
+            err=True,
+        )
+        final = NeuralModel(n_epochs=best_epoch, lr=lr, checkpoint_path=str(checkpoint))
+        final.fit(train_results=results, early_stopping=False)
+        final.save(checkpoint)
+        typer.echo(f"Production checkpoint (all data) saved to {checkpoint}")
+    else:
+        model.save(checkpoint)
+        typer.echo(f"Checkpoint saved to {checkpoint}")

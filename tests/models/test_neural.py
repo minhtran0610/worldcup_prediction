@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from features.form import FORM_FEATURE_DIM
-from models.neural import FORM_N, NeuralModel, ScoreGridNet
+from models.neural import CONTEXT_DIM, FORM_N, NeuralModel, ScoreGridNet
 
 # ---------------------------------------------------------------------------
 # Shared synthetic data helpers
@@ -107,7 +107,7 @@ def _make_random_batch(batch_size: int, n_teams: int = 9):
     away_idx = torch.randint(1, n_teams, (batch_size,))
     home_seq = torch.randn(batch_size, FORM_N, FORM_FEATURE_DIM)
     away_seq = torch.randn(batch_size, FORM_N, FORM_FEATURE_DIM)
-    context = torch.randn(batch_size, 11)  # 11-dim: 7 original + 4 squad features
+    context = torch.randn(batch_size, CONTEXT_DIM)  # context features (see CONTEXT_DIM)
     return home_idx, away_idx, home_seq, away_seq, context
 
 

@@ -241,6 +241,9 @@ class NeuralModel:
         self._team_vocab: dict[str, int] = {}
         self._net: ScoreGridNet | None = None
         self._train_results: pd.DataFrame | None = None
+        # Epoch at which the best val NLL occurred (set by fit). Used by callers
+        # that want to refit on all data for the same number of epochs.
+        self.best_epoch_: int | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -286,12 +289,17 @@ class NeuralModel:
         self,
         train_results: pd.DataFrame,
         val_results: pd.DataFrame | None = None,
+        early_stopping: bool = True,
     ) -> NeuralModel:
         """Train ScoreGridNet on train_results with early stopping on val NLL.
 
         Builds the team vocabulary from train_results.
         If val_results is None, uses the last 10% of train_results (chronologically) as val.
         Prints epoch loss every 10 epochs.
+
+        If early_stopping is False, trains on ALL of train_results for the full
+        n_epochs with no held-out validation and no early stopping — used for the
+        production refit on all data. The val_results argument is ignored in that case.
         """
         # Store the full training data for form look-ups during predict_batch
         self._train_results = train_results.reset_index(drop=True)
@@ -303,8 +311,13 @@ class NeuralModel:
         self._team_vocab = {t: i + 1 for i, t in enumerate(teams)}
         n_teams = len(teams) + 1  # +1 for UNK slot
 
-        # Chronological val split if caller did not provide one
-        if val_results is None:
+        # Chronological val split if caller did not provide one.
+        # When early_stopping is off (production refit), train on ALL data; val_df
+        # is a logging proxy only (full corpus) — nothing is held out from training.
+        if not early_stopping:
+            train_df = train_results.reset_index(drop=True)
+            val_df = train_df
+        elif val_results is None:
             n_val = max(1, int(len(train_results) * 0.10))
             train_df = train_results.iloc[:-n_val].reset_index(drop=True)
             val_df = train_results.iloc[-n_val:].reset_index(drop=True)
@@ -322,6 +335,7 @@ class NeuralModel:
 
         best_val_nll: float = float("inf")
         best_state: dict[str, Any] = {}
+        best_epoch: int = self.n_epochs
         epochs_no_improve: int = 0
 
         n_train = len(train_df)
@@ -392,8 +406,12 @@ class NeuralModel:
                     f"train_nll={train_nll:.4f}  val_nll={val_nll:.4f}"
                 )
 
+            if not early_stopping:
+                continue  # no model selection / no stopping — keep training to n_epochs
+
             if val_nll < best_val_nll - 1e-6:
                 best_val_nll = val_nll
+                best_epoch = epoch
                 best_state = {k: v.clone() for k, v in self._net.state_dict().items()}
                 epochs_no_improve = 0
             else:
@@ -402,10 +420,11 @@ class NeuralModel:
                     print(f"Early stopping at epoch {epoch} (best val_nll={best_val_nll:.4f})")
                     break
 
-        # Restore the best checkpoint
+        # Restore the best checkpoint (early-stopping mode only; otherwise keep final weights)
         if best_state:
             self._net.load_state_dict(best_state)
 
+        self.best_epoch_ = best_epoch if early_stopping else self.n_epochs
         self._net.eval()
         return self
 

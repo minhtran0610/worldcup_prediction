@@ -19,9 +19,7 @@ app = typer.Typer()
 @app.command()
 def main(
     csv_path: Path | None = typer.Option(None, help="Path to Kaggle results CSV"),
-    checkpoint: Path = typer.Option(
-        Path("checkpoints/neural_v2.pt"), help="Where to save checkpoint"
-    ),
+    checkpoint: Path = typer.Option(Path("checkpoints/neural.pt"), help="Where to save checkpoint"),
     n_epochs: int = typer.Option(150, help="Maximum training epochs"),
     lr: float = typer.Option(3e-4, help="Adam learning rate"),
     val_months: int = typer.Option(6, help="Hold-out validation months at end of data"),

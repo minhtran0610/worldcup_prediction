@@ -413,7 +413,8 @@ def main(
     csv_path: Path | None = typer.Option(None, help="Path to Kaggle results CSV"),
     model: str = typer.Option("neural", help="Model: 'dc', 'xgb', 'neural', 'ensemble'"),
     checkpoint: Path | None = typer.Option(
-        None, help="Neural checkpoint path (for neural/ensemble)"
+        Path("checkpoints/neural.pt"),
+        help="Neural checkpoint path (for neural/ensemble); loaded if present, else fits fresh",
     ),
     min_edge: float = typer.Option(0.02, help="Minimum edge to flag as value bet"),
     show_all: bool = typer.Option(False, help="Show all matches, not just value bets"),

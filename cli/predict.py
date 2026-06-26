@@ -44,7 +44,7 @@ def main(
     odds_away: float | None = typer.Option(None, help="Closing decimal odds for away win"),
     model: str = typer.Option("neural", help="Model: 'neural', 'dc', or 'elo'"),
     checkpoint: Path = typer.Option(
-        Path("checkpoints/neural_v2.pt"), help="Neural model checkpoint path"
+        Path("checkpoints/neural.pt"), help="Neural model checkpoint path"
     ),
 ) -> None:
     try:

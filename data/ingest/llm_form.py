@@ -281,19 +281,30 @@ def fetch_team_news(team: str, max_articles: int = 3) -> tuple[list[str], list[s
 # ── Ollama extraction ─────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = (
-    "You are a structured data extractor for football analytics. Your task is to "
-    "analyse recent news text about a national football team and extract two kinds of signal: "
-    "(a) how the team has been performing and what the narrative around them is, and "
-    "(b) confirmed player absences for their next match.\n\n"
+    "You are a football analyst extracting a team's CURRENT performance state from recent "
+    "news text. A statistical model already handles the raw facts — match results, goals "
+    "scored/conceded, and the FIFA-ranking strength of each team. Do NOT simply re-report "
+    "scorelines or who won; the model already knows them. Your unique job is the part the "
+    "scoreline misses: HOW the team is actually playing and the momentum around them.\n\n"
+    "Focus especially on:\n"
+    "  - Performance vs. result: did they win/lose by more or less than they deserved? "
+    "(e.g. 'won 1-0 but were outplayed', 'lost but dominated', 'flattering scoreline').\n"
+    "  - Tournament momentum and trajectory: improving or declining through the tournament, "
+    "growing confidence or mounting pressure, knockout-stage readiness.\n"
+    "  - Team-system signals: tactical changes, manager situation, dressing-room morale, "
+    "cohesion or unrest, key players in or out of form.\n"
+    "  - Confirmed absences for the next match (injuries/suspensions).\n\n"
     "STRICT RULES:\n"
     "1. Only extract information EXPLICITLY stated in the provided text — never infer, "
     "assume, or draw on external knowledge.\n"
-    "2. performance_context: summarise in 1-3 sentences the team's recent form narrative — "
-    "e.g. dominant wins, poor performances, tactical improvements, scoring/defensive issues, "
-    "player form, press/public perception, tournament momentum. Leave empty if nothing is stated.\n"
-    "3. form_score [-1, 1]: reflect the OVERALL sentiment — factor in performance quality, "
-    "momentum, key absences, and morale together. Positive = strong form / confident narrative; "
-    "negative = poor performances / internal issues / key players missing; 0 = neutral/unclear.\n"
+    "2. performance_context: summarise in 1-3 sentences the team's CURRENT form and how they "
+    "have actually been playing — performance quality relative to results, tactical state, "
+    "momentum, morale, press/public perception. Do not just list scorelines. Empty if nothing stated.\n"
+    "3. form_score [-1, 1]: the OVERALL judgement of how well this team is genuinely going right "
+    "now — weigh performance quality, momentum, morale, and key absences together, NOT just "
+    "whether they won. Positive = playing well / rising / confident; negative = struggling / "
+    "declining / unsettled / weakened; 0 = neutral or unclear. A team that keeps winning "
+    "unconvincingly may be modest positive; a team losing while dominant may be near zero.\n"
     "4. key_absences: only include players explicitly described as OUT, injured, suspended, "
     "sent off (red card = automatic one-match suspension), or will miss the next match. "
     "Do NOT include players described as 'doubtful', 'carrying a knock', "
@@ -321,7 +332,11 @@ _USER_TEMPLATE = (
     '"morale_signals": [<strings: direct short phrases from text indicating {team} morale or '
     "team atmosphere>], "
     '"tactical_notes": "<string: {team} tactical changes or coach statements, empty if none>", '
-    '"confidence": <float 0.0 to 1.0: 0=team barely mentioned, 1=rich pre-match report>}}'
+    '"confidence": <float 0.0 to 1.0: how strongly the text supports your form_score. '
+    "This value scales how much your judgement moves the prediction, so be calibrated: "
+    "0=team barely mentioned or no clear performance signal; 0.3-0.5=some signal but mixed or "
+    "thin; 0.7-1.0=multiple clear, decisive statements about how the team is playing. "
+    "Reserve high confidence for genuinely strong, well-sourced evidence>}}"
 )
 
 

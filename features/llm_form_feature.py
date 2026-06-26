@@ -9,11 +9,15 @@ Formula
     adj_factor = 1 + K_SENTIMENT * form_score * confidence
     lambda_adj  = lambda_base * adj_factor
 
-K_SENTIMENT default: 0.08
-    At full confidence and extreme score (±1.0), this is a ±8% λ shift.
-    For comparison, the injury adjustment can shift λ by up to ~30%.
-    Sentiment is kept small intentionally — narrative is noisier than
-    confirmed absences.
+K_SENTIMENT default: 0.30
+    At full confidence and extreme score (±1.0), this is a ±30% λ shift —
+    deliberately on par with the injury adjustment's realistic peak. Narrative
+    form (tournament momentum, performance-vs-result, morale, manager situation)
+    captures team-level signal that confirmed absences alone miss, so it is given
+    equal authority. The safeguard against narrative noise is *confidence*, not a
+    small coefficient: the shift scales with the LLM's extraction confidence, so a
+    thin or hedgy read moves λ almost nothing while a richly-sourced, decisive read
+    can move it as much as a major injury.
 
 Confidence gating
 -----------------
@@ -32,7 +36,7 @@ Application order
 
 from __future__ import annotations
 
-K_SENTIMENT: float = 0.08
+K_SENTIMENT: float = 0.30
 MIN_CONFIDENCE: float = 0.25
 
 
@@ -51,21 +55,22 @@ def compute_sentiment_factor(
     confidence:
         Extraction confidence in [0, 1] from FormAnalysis.
     k:
-        Dampening coefficient. Default 0.08 — max ±8% λ shift at full confidence.
+        Dampening coefficient. Default 0.30 — max ±30% λ shift at full confidence,
+        on par with the injury adjustment.
     min_confidence:
         Analyses below this threshold are treated as no signal (factor = 1.0).
 
     Returns
     -------
     float
-        Multiplier to apply to λ.  Range ≈ [0.92, 1.08] at default K.
+        Multiplier to apply to λ.  Range ≈ [0.70, 1.30] at default K.
         Returns 1.0 (no change) when confidence < min_confidence.
     """
     if confidence < min_confidence:
         return 1.0
     factor = 1.0 + k * form_score * confidence
     # Hard floor / ceiling to prevent pathological values from bad LLM output
-    return max(0.80, min(1.20, factor))
+    return max(0.70, min(1.30, factor))
 
 
 def apply_sentiment_adjustment(

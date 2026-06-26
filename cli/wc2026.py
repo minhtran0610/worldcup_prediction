@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -371,6 +372,37 @@ def _save_odds_snapshot(live_odds: list[dict]) -> None:
         typer.echo(f"[wc2026] WARNING: could not save odds snapshot — {exc}", err=True)
 
 
+_FORM_LOG_PATH: Path = Path("data/cache/llm_form_log.jsonl")
+
+
+def _log_form_reads(form_analyses: dict) -> None:
+    """Append each team's pre-match LLM form read to an on-disk JSONL log.
+
+    One record per team per run, stamped with the run time. This is the live
+    validation trail: narrative form can't be backtested (no historical RSS), so
+    we accumulate the LLM's *pre-match* reads here and later compare them against
+    actual results to judge whether the signal earns its weight. Best-effort —
+    write failures are swallowed so they never break a prediction run.
+    """
+    ts = datetime.now(tz=UTC).isoformat()
+    try:
+        _FORM_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _FORM_LOG_PATH.open("a") as f:
+            for team, fa in form_analyses.items():
+                rec = {
+                    "logged_at": ts,
+                    "team": team,
+                    "form_score": fa.form_score,
+                    "confidence": fa.confidence,
+                    "key_absences": fa.key_absences,
+                    "performance_context": fa.performance_context,
+                    "n_articles": fa.n_articles,
+                }
+                f.write(json.dumps(rec, default=str) + "\n")
+    except Exception as exc:
+        typer.echo(f"[wc2026] WARNING: could not write form log — {exc}", err=True)
+
+
 # ---------------------------------------------------------------------------
 # Main command
 # ---------------------------------------------------------------------------
@@ -388,9 +420,9 @@ def main(
     injuries: bool = typer.Option(True, help="Apply injury/suspension λ adjustment"),
     injury_k: float = typer.Option(0.5, help="Injury dampening coefficient K (0–1)"),
     llm_form: bool = typer.Option(
-        False,
+        True,
         "--llm-form/--no-llm-form",
-        help="Apply LLM narrative form sentiment adjustment (~2 min)",
+        help="Apply LLM narrative tournament-form adjustment (~2 min). On by default.",
     ),
     llm_model: str = typer.Option("qwen3.5:9b", help="Ollama model for LLM form analysis"),
 ) -> None:
@@ -648,6 +680,7 @@ def main(
             form_analyses = {}
 
         if form_analyses:
+            _log_form_reads(form_analyses)
             typer.echo("\n[LLM Form Analysis]", err=True)
             seen_teams: set[str] = set()
             for uprow in upcoming.itertuples(index=False):

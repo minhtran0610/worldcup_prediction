@@ -6,6 +6,23 @@ from data.ingest.cache import load_cache, save_cache
 
 RESULTS_CACHE_KEY: str = "results"
 
+# WC 2026 matches now appear in the Kaggle results dataset. We keep them out of
+# the trained weights (the net learns general football, not this one tournament)
+# and let the live schedule be the single source of truth for WC 2026 form at
+# predict time — otherwise cached WC rows + live-schedule injection double-count.
+WC2026_START: pd.Timestamp = pd.Timestamp("2026-06-01")
+
+
+def is_wc2026_match(df: pd.DataFrame) -> pd.Series:
+    """Boolean mask selecting WC 2026 tournament matches in a results-style frame."""
+    return (df["tournament"] == "FIFA World Cup") & (df["date"] >= WC2026_START)
+
+
+def drop_wc2026(df: pd.DataFrame) -> pd.DataFrame:
+    """Return df with WC 2026 matches removed (index reset)."""
+    return df[~is_wc2026_match(df)].reset_index(drop=True)
+
+
 KEEP_COLUMNS: list[str] = [
     "date",
     "home_team",

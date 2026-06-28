@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import typer
 
-from data.ingest.results import load_results
+from data.ingest.results import drop_wc2026, load_results
 from eval.metrics import aggregate_rps
 from features.context import derive_context
 from features.elo import compute_elo_ratings
@@ -37,6 +37,14 @@ def main(
     except FileNotFoundError as exc:
         typer.echo(f"Error: {exc}", err=False)
         raise typer.Exit(1)
+
+    # Keep WC 2026 out of the trained weights — the net should learn general
+    # football, and WC form enters at predict time via runtime form/Elo context.
+    n_before = len(results)
+    results = drop_wc2026(results)
+    n_dropped = n_before - len(results)
+    if n_dropped:
+        typer.echo(f"Excluded {n_dropped} WC 2026 match(es) from training data.", err=True)
 
     results = compute_elo_ratings(results)
 

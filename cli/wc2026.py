@@ -11,7 +11,7 @@ import typer
 from data.ingest.injuries import fetch_wc2026_injuries
 from data.ingest.llm_form import get_all_teams_form
 from data.ingest.odds_live import fetch_upcoming_odds, get_api_key
-from data.ingest.results import load_results
+from data.ingest.results import drop_wc2026, load_results
 from data.ingest.wc2026 import load_wc2026_schedule
 from eval.backtest import KELLY_FRACTION
 from eval.metrics import remove_margin
@@ -448,6 +448,19 @@ def main(
     except FileNotFoundError as exc:
         typer.echo(f"Error: {exc}", err=False)
         raise typer.Exit(1)
+
+    # Drop any WC 2026 matches that have leaked into the Kaggle cache — the live
+    # schedule injected below is the single source of truth for them, so keeping
+    # the cached copies would double-count in the Elo forward pass and form
+    # sequences.
+    n_before = len(results)
+    results = drop_wc2026(results)
+    n_dropped = n_before - len(results)
+    if n_dropped:
+        typer.echo(
+            f"Dropped {n_dropped} cached WC 2026 match(es); using live schedule as source.",
+            err=True,
+        )
 
     results = compute_elo_ratings(results)
 

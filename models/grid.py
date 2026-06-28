@@ -38,27 +38,44 @@ def derive_markets(grid: np.ndarray) -> dict[str, float]:
     """Derive all market probabilities as deterministic sums over the grid.
 
     Returns dict with keys:
-        home_win, draw, away_win          — must sum to 1.0
-        over_0_5, under_0_5              — must sum to 1.0
-        over_1_5, under_1_5
-        over_2_5, under_2_5
-        over_3_5, under_3_5
-        btts_yes, btts_no                — must sum to 1.0
+        home_win, draw, away_win
+        over_0_5 … over_4_5  (and matching under_*)
+        btts_yes, btts_no
+        ah_home_m1_5, ah_home_m0_5, ah_home_p0_5, ah_home_p1_5
+            — Asian handicap half-goal lines, home-team-covers probability.
+            m = minus (home gives goals), p = plus (home receives goals).
+            Half-goal lines have no push; away equivalents = 1 − home.
+        ah_home_m1_win, ah_home_m1_push  — full-goal -1 line (push on 1-goal win)
+        ah_home_p1_win, ah_home_p1_push  — full-goal +1 line (push on 1-goal loss)
     """
     size = grid.shape[0]
     i_idx, j_idx = np.meshgrid(np.arange(size), np.arange(size), indexing="ij")
     total_goals = i_idx + j_idx
+    diff = i_idx - j_idx  # home_goals − away_goals
 
-    home_win = float(grid[i_idx > j_idx].sum())
-    draw = float(grid[i_idx == j_idx].sum())
-    away_win = float(grid[i_idx < j_idx].sum())
+    home_win = float(grid[diff > 0].sum())
+    draw = float(grid[diff == 0].sum())
+    away_win = float(grid[diff < 0].sum())
 
     over_0_5 = float(grid[total_goals >= 1].sum())
     over_1_5 = float(grid[total_goals >= 2].sum())
     over_2_5 = float(grid[total_goals >= 3].sum())
     over_3_5 = float(grid[total_goals >= 4].sum())
+    over_4_5 = float(grid[total_goals >= 5].sum())
 
     btts_yes = float(grid[(i_idx >= 1) & (j_idx >= 1)].sum())
+
+    # Asian handicap — half-goal lines (no push)
+    ah_home_m1_5 = float(grid[diff >= 2].sum())  # home wins by 2+
+    ah_home_m0_5 = home_win  # home wins
+    ah_home_p0_5 = home_win + draw  # home doesn't lose
+    ah_home_p1_5 = float(grid[diff >= -1].sum())  # home doesn't lose by 2+
+
+    # Asian handicap — full-goal lines (push on exact margin)
+    ah_home_m1_win = float(grid[diff >= 2].sum())
+    ah_home_m1_push = float(grid[diff == 1].sum())
+    ah_home_p1_win = home_win + draw  # home wins or draws (+1 covers on win/draw)
+    ah_home_p1_push = float(grid[diff == -1].sum())
 
     return {
         "home_win": home_win,
@@ -72,8 +89,18 @@ def derive_markets(grid: np.ndarray) -> dict[str, float]:
         "under_2_5": 1.0 - over_2_5,
         "over_3_5": over_3_5,
         "under_3_5": 1.0 - over_3_5,
+        "over_4_5": over_4_5,
+        "under_4_5": 1.0 - over_4_5,
         "btts_yes": btts_yes,
         "btts_no": 1.0 - btts_yes,
+        "ah_home_m1_5": ah_home_m1_5,
+        "ah_home_m0_5": ah_home_m0_5,
+        "ah_home_p0_5": ah_home_p0_5,
+        "ah_home_p1_5": ah_home_p1_5,
+        "ah_home_m1_win": ah_home_m1_win,
+        "ah_home_m1_push": ah_home_m1_push,
+        "ah_home_p1_win": ah_home_p1_win,
+        "ah_home_p1_push": ah_home_p1_push,
     }
 
 

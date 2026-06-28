@@ -48,8 +48,8 @@ _BBC_WC_RSS = "https://feeds.bbci.co.uk/sport/football/world-cup/rss.xml"
 _BBC_SPORT_RSS = "https://feeds.bbci.co.uk/sport/football/rss.xml"
 _GUARDIAN_WC_RSS = "https://www.theguardian.com/football/world-cup-2026/rss"
 _GUARDIAN_FOOTBALL_RSS = "https://www.theguardian.com/football/rss"
-_MAX_COMBINED_CHARS = 2500
-_ARTICLE_FETCH_WORKERS = 4
+_MAX_COMBINED_CHARS = 8000
+_ARTICLE_FETCH_WORKERS = 8
 
 DEFAULT_MODEL = "qwen3.5:9b"
 FALLBACK_MODEL = "gemma4:e4b"
@@ -64,7 +64,7 @@ _SEARCH_TERMS: dict[str, list[str]] = {
     "Belgium": ["Belgium", "Belgian", "Red Devils"],
     "Bosnia and Herzegovina": ["Bosnia"],
     "Brazil": ["Brazil", "Seleção"],
-    "Canada": ["Canada", "Canadian"],
+    "Canada": ["Canada", "Canadian", "CanMNT", "Marsch", "Davies"],
     "Cape Verde": ["Cape Verde"],
     "Colombia": ["Colombia", "Colombian"],
     "Croatia": ["Croatia", "Croatian"],
@@ -95,7 +95,7 @@ _SEARCH_TERMS: dict[str, list[str]] = {
     "Saudi Arabia": ["Saudi Arabia", "Saudi"],
     "Scotland": ["Scotland", "Scottish"],
     "Senegal": ["Senegal"],
-    "South Africa": ["South Africa", "Bafana"],
+    "South Africa": ["South Africa", "Bafana", "Broos", "Lyle Foster"],
     "South Korea": ["South Korea", "Korea"],
     "Spain": ["Spain", "Spanish", "La Roja"],
     "Sweden": ["Sweden", "Swedish"],
@@ -212,7 +212,38 @@ def _fetch_article_text(url: str) -> str:
     return " ".join(cleaned)[:_MAX_COMBINED_CHARS]
 
 
-def fetch_team_news(team: str, max_articles: int = 3) -> tuple[list[str], list[str]]:
+def fetch_match_news(home: str, away: str, max_articles: int = 12) -> tuple[list[str], list[str]]:
+    """Fetch articles for both teams, interleaved to guarantee equal representation.
+
+    Fetches up to max_articles//2 per team independently (title-first ordering),
+    then interleaves home/away articles so neither team's content is displaced by
+    the other when the combined text is truncated. Deduplicates by URL.
+    Returns (texts, urls).
+    """
+    per_team = max(2, max_articles // 2)
+    home_texts, home_urls = fetch_team_news(home, max_articles=per_team)
+    away_texts, away_urls = fetch_team_news(away, max_articles=per_team)
+
+    seen: set[str] = set()
+    texts: list[str] = []
+    urls: list[str] = []
+    for h_text, h_url, a_text, a_url in zip(
+        home_texts + [None] * per_team,
+        home_urls + [None] * per_team,
+        away_texts + [None] * per_team,
+        away_urls + [None] * per_team,
+        strict=False,
+    ):
+        for text, url in ((h_text, h_url), (a_text, a_url)):
+            if text and url and url not in seen:
+                seen.add(url)
+                texts.append(text)
+                urls.append(url)
+
+    return texts[:max_articles], urls[:max_articles]
+
+
+def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[str]]:
     """Return (texts, urls) — article bodies + source URLs for *team*.
 
     Searches BBC WC RSS (primary) and BBC Sport RSS (secondary).
@@ -229,24 +260,41 @@ def fetch_team_news(team: str, max_articles: int = 3) -> tuple[list[str], list[s
     for rss_url in [_BBC_WC_RSS, _GUARDIAN_WC_RSS, _BBC_SPORT_RSS, _GUARDIAN_FOOTBALL_RSS]:
         all_items.extend(_fetch_rss(rss_url))
 
-    # Deduplicate by URL and filter to team-relevant items
-    seen: set[str] = set()
-    matched: list[dict] = []
+    # Deduplicate by URL and content fingerprint (same article, different URLs).
+    # Separate title matches (team is primary subject) from description-only
+    # matches where the term must appear at least twice (filters host-country noise).
+    seen_urls: set[str] = set()
+    seen_fingerprints: set[str] = set()
+    title_matches: list[dict] = []
+    desc_matches: list[dict] = []
     for item in all_items:
         link = item["link"]
-        if not link or link in seen:
+        if not link or link in seen_urls:
             continue
-        haystack = (item["title"] + " " + item["description"]).lower()
-        if any(term in haystack for term in search_lower):
-            seen.add(link)
-            matched.append(item)
-        if len(matched) >= max_articles:
-            break
+        # Content fingerprint: first 120 chars of title+description
+        fingerprint = (item["title"] + item["description"])[:120].lower()
+        if fingerprint in seen_fingerprints:
+            continue
+        title_lower = item["title"].lower()
+        # Strip HTML before counting — Guardian descriptions embed team names in href attrs
+        desc_clean = _clean_html(item["description"]).lower()
+        in_title = any(term in title_lower for term in search_lower)
+        # Description-only: require term appears at least twice in plain text to avoid noise
+        if not in_title:
+            desc_count = sum(desc_clean.count(term) for term in search_lower)
+            in_desc = desc_count >= 2
+        else:
+            in_desc = False
+        if in_title or in_desc:
+            seen_urls.add(link)
+            seen_fingerprints.add(fingerprint)
+            (title_matches if in_title else desc_matches).append(item)
+
+    # Title matches first — these are articles where the team is the primary subject
+    matched = (title_matches + desc_matches)[:max_articles]
 
     if not matched:
         return [], []
-
-    urls = [m["link"] for m in matched]
 
     urls = [m["link"] for m in matched]
     # RSS descriptions are clean summaries; always available regardless of domain.
@@ -282,37 +330,33 @@ def fetch_team_news(team: str, max_articles: int = 3) -> tuple[list[str], list[s
 
 _SYSTEM_PROMPT = (
     "You are a football analyst extracting a team's CURRENT performance state from recent "
-    "news text. A statistical model already handles the raw facts — match results, goals "
-    "scored/conceded, and the FIFA-ranking strength of each team. Do NOT simply re-report "
-    "scorelines or who won; the model already knows them. Your unique job is the part the "
-    "scoreline misses: HOW the team is actually playing and the momentum around them.\n\n"
-    "Focus especially on:\n"
-    "  - Performance vs. result: did they win/lose by more or less than they deserved? "
-    "(e.g. 'won 1-0 but were outplayed', 'lost but dominated', 'flattering scoreline').\n"
-    "  - Tournament momentum and trajectory: improving or declining through the tournament, "
-    "growing confidence or mounting pressure, knockout-stage readiness.\n"
-    "  - Team-system signals: tactical changes, manager situation, dressing-room morale, "
-    "cohesion or unrest, key players in or out of form.\n"
-    "  - Confirmed absences for the next match (injuries/suspensions).\n\n"
-    "STRICT RULES:\n"
-    "1. Only extract information EXPLICITLY stated in the provided text — never infer, "
-    "assume, or draw on external knowledge.\n"
-    "2. performance_context: summarise in 1-3 sentences the team's CURRENT form and how they "
-    "have actually been playing — performance quality relative to results, tactical state, "
-    "momentum, morale, press/public perception. Do not just list scorelines. Empty if nothing stated.\n"
-    "3. form_score [-1, 1]: the OVERALL judgement of how well this team is genuinely going right "
-    "now — weigh performance quality, momentum, morale, and key absences together, NOT just "
-    "whether they won. Positive = playing well / rising / confident; negative = struggling / "
-    "declining / unsettled / weakened; 0 = neutral or unclear. A team that keeps winning "
-    "unconvincingly may be modest positive; a team losing while dominant may be near zero.\n"
-    "4. key_absences: only include players explicitly described as OUT, injured, suspended, "
-    "sent off (red card = automatic one-match suspension), or will miss the next match. "
-    "Do NOT include players described as 'doubtful', 'carrying a knock', "
-    "'a slight concern', 'returned to training', or similar.\n"
-    "5. If the text contains no useful signal, return form_score=0.0, empty lists/strings, "
-    "and confidence at or below 0.15.\n"
-    "6. You MUST output valid JSON matching the exact schema — no markdown fences, "
-    "no explanation, no text outside the JSON object."
+    "news text. Extract ANYTHING the article says about how the team is playing — results, "
+    "scorelines, style, morale, momentum, manager situation, key players. Be generous: "
+    "if the article mentions it in the context of this team's performance or tournament "
+    "journey, include it.\n\n"
+    "Extract especially:\n"
+    "  - Results and how they happened: scorelines, margin of victory/defeat, whether the "
+    "result flattered or understated performance ('thumping', 'comfortable', 'lucky', "
+    "'dominant', 'outplayed', 'deserved more').\n"
+    "  - Momentum and trajectory: improving or declining, growing confidence or pressure, "
+    "knockout-stage readiness, historic achievements that affect belief.\n"
+    "  - Team and manager signals: tactical setup, dressing-room atmosphere, coach "
+    "statements, player form, squad cohesion or unrest.\n"
+    "  - Confirmed absences: players explicitly described as OUT, injured, suspended, "
+    "or sent off FOR THE NEXT MATCH. Do NOT include players described as 'doubtful', "
+    "'carrying a knock', 'returned to training', 'returning', 'expected back', 'set to "
+    "return', 'available', or 'back in the squad' — these players are NOT absent. "
+    "Past absences that have ended are NOT absences.\n\n"
+    "RULES:\n"
+    "1. Only use information EXPLICITLY stated in the text — no external knowledge.\n"
+    "2. performance_context: ALWAYS fill this. Summarise what the articles say about this "
+    "team's form and momentum. If genuinely nothing is said, explain what the articles "
+    "covered instead.\n"
+    "3. form_score [-1, 1]: overall momentum signal. Positive = playing well / rising / "
+    "confident. Negative = struggling / unsettled / weakened. 0 = nothing to go on.\n"
+    "4. confidence [0, 1]: how much evidence you have. 0 = team barely mentioned. "
+    "0.5 = some signal. 0.9+ = multiple clear statements about form and momentum.\n"
+    "5. Output valid JSON only — no markdown, no text outside the JSON object."
 )
 
 _USER_TEMPLATE = (
@@ -324,9 +368,9 @@ _USER_TEMPLATE = (
     "Return JSON with EXACTLY this schema (no extra keys):\n"
     '{{"form_score": <float -1.0 to 1.0: overall narrative sentiment for {team} — '
     "factor in performance quality, momentum, morale, and absences together>, "
-    '"performance_context": "<string: 1-3 sentence summary of {team}\'s recent performance '
-    "narrative — results, style of play, scoring/defensive trends, press perception, "
-    'tournament momentum — empty string if nothing stated>", '
+    '"performance_context": "<string: REQUIRED — 1-3 sentences on {team}\'s current form '
+    "narrative (performance quality, momentum, morale, press perception) OR, if no signal, "
+    'a brief explanation of what the articles covered and why no form signal could be extracted>", '
     '"key_absences": [<strings: names of {team} players confirmed absent for their NEXT match — '
     "never list players from the opposing team>], "
     '"morale_signals": [<strings: direct short phrases from text indicating {team} morale or '
@@ -452,7 +496,7 @@ def analyse_team_form(
 def get_team_form_analysis(
     team: str,
     model: str = DEFAULT_MODEL,
-    max_articles: int = 3,
+    max_articles: int = 6,
 ) -> FormAnalysis:
     """Fetch news and run LLM extraction for one team.
 
@@ -476,6 +520,39 @@ def get_team_form_analysis(
     return analysis
 
 
+def get_match_form_analysis(
+    home: str,
+    away: str,
+    model: str = DEFAULT_MODEL,
+    max_articles: int = 8,
+) -> dict[str, FormAnalysis]:
+    """Fetch articles for both teams combined, extract signals for each in one LLM call.
+
+    Returns {home: FormAnalysis, away: FormAnalysis}.
+    A match preview article contributes signal to both sides simultaneously.
+    """
+    print(f"[llm_form] Fetching match news for {home!r} vs {away!r}...", file=sys.stderr)
+    per_team = max(2, max_articles // 2)
+    home_texts, home_urls = fetch_team_news(home, max_articles=per_team)
+    away_texts, away_urls = fetch_team_news(away, max_articles=per_team)
+
+    if not home_texts and not away_texts:
+        print(
+            f"[llm_form] No articles found for {home} vs {away} — returning neutral.",
+            file=sys.stderr,
+        )
+        return {home: FormAnalysis.neutral(home), away: FormAnalysis.neutral(away)}
+
+    print(
+        f"[llm_form] {home}: {len(home_texts)} article(s), "
+        f"{away}: {len(away_texts)} article(s) → running {model}...",
+        file=sys.stderr,
+    )
+    home_fa = analyse_team_form(home, home_texts, urls=home_urls, model=model)
+    away_fa = analyse_team_form(away, away_texts, urls=away_urls, model=model)
+    return {home: home_fa, away: away_fa}
+
+
 def get_all_teams_form(
     teams: list[str],
     model: str = DEFAULT_MODEL,
@@ -486,3 +563,19 @@ def get_all_teams_form(
     HTTP article fetches within each team are parallelised.
     """
     return {team: get_team_form_analysis(team, model=model) for team in teams}
+
+
+def get_all_matches_form(
+    match_pairs: list[tuple[str, str]],
+    model: str = DEFAULT_MODEL,
+) -> dict[str, FormAnalysis]:
+    """Run combined match-level form analysis for a list of (home, away) pairs.
+
+    Each pair is one LLM call reading articles for both teams simultaneously.
+    Returns {team_name: FormAnalysis} for all teams across all pairs.
+    """
+    results: dict[str, FormAnalysis] = {}
+    for home, away in match_pairs:
+        pair_results = get_match_form_analysis(home, away, model=model)
+        results.update(pair_results)
+    return results

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import html
 import json
+import os as _os
 import re
 import sys
 import urllib.request
@@ -42,7 +43,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-_OLLAMA_BASE = "http://localhost:11434"
+_OLLAMA_BASE = _os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 _OLLAMA_TIMEOUT = 45  # seconds — allow for cold model load
 _BBC_WC_RSS = "https://feeds.bbci.co.uk/sport/football/world-cup/rss.xml"
 _BBC_SPORT_RSS = "https://feeds.bbci.co.uk/sport/football/rss.xml"

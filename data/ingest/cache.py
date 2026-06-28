@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -9,9 +10,9 @@ CACHE_DIR: Path = Path(__file__).resolve().parent.parent / "raw"
 def load_cache(name: str) -> pd.DataFrame | None:
     path = CACHE_DIR / f"{name}.parquet"
     if path.exists():
-        print(f"[cache] HIT {name}")
+        print(f"[cache] HIT {name}", file=sys.stderr)
         return pd.read_parquet(path, engine="pyarrow")
-    print(f"[cache] MISS {name}")
+    print(f"[cache] MISS {name}", file=sys.stderr)
     return None
 
 
@@ -19,4 +20,4 @@ def save_cache(name: str, df: pd.DataFrame) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = CACHE_DIR / f"{name}.parquet"
     df.to_parquet(path, engine="pyarrow", index=False)
-    print(f"[cache] SAVED {name} ({len(df)} rows)")
+    print(f"[cache] SAVED {name} ({len(df)} rows)", file=sys.stderr)

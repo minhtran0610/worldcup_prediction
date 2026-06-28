@@ -132,6 +132,97 @@ def _format_row_no_odds(
 
 
 # ---------------------------------------------------------------------------
+# Telegram formatter
+# ---------------------------------------------------------------------------
+
+
+def _format_telegram_match(
+    home: str,
+    away: str,
+    kickoff: pd.Timestamp,
+    prob_home: float,
+    prob_draw: float,
+    prob_away: float,
+    lambda_home: float,
+    lambda_away: float,
+    market_detail: dict,
+    market_probs: dict | None,
+    best_edge: float | None,
+    best_outcome: str | None,
+    best_decimal_odds: float | None,
+    kelly: float | None,
+    is_value: bool,
+    fa_home,
+    fa_away,
+    min_edge: float,
+) -> str:
+    parts: list[str] = []
+    parts.append(f"⚽ <b>{home} vs {away}</b>  ·  {_ko_str(kickoff)} UTC")
+
+    # Form
+    if fa_home is not None or fa_away is not None:
+        parts.append("")
+        parts.append("<b>📰 Form</b>")
+        for team, fa in ((home, fa_home), (away, fa_away)):
+            if fa is None:
+                parts.append(f"⬜ <b>{team}</b>  no data")
+                continue
+            emoji = "🟢" if fa.form_score > 0.15 else ("🔴" if fa.form_score < -0.15 else "🟡")
+            parts.append(f"{emoji} <b>{team}</b>  {fa.form_score:+.2f} ({fa.confidence:.0%} conf)")
+            if fa.key_absences:
+                parts.append(f"    ⚠️ Out: {', '.join(fa.key_absences[:3])}")
+            ctx = fa.performance_context or (
+                f"({fa.n_articles} article(s) — no narrative extracted)"
+                if fa.n_articles > 0
+                else "(no recent articles found)"
+            )
+            parts.append(f"    {ctx}")
+
+    # Probabilities
+    parts.append("")
+    parts.append("<b>📊 Model vs Market</b>" if market_probs else "<b>📊 Probabilities</b>")
+    for key, label, our_p in (
+        ("home", f"Home ({home})", prob_home),
+        ("draw", "Draw", prob_draw),
+        ("away", f"Away ({away})", prob_away),
+    ):
+        if market_probs:
+            mkt_p = market_probs[key]
+            edge = our_p - mkt_p
+            flag = "  ✅ VALUE" if (key == best_outcome and is_value) else ""
+            parts.append(f"  {label:<22} {our_p:.1%}  mkt {mkt_p:.1%}  ({edge:+.1%}){flag}")
+        else:
+            parts.append(f"  {label:<22} {our_p:.1%}")
+    parts.append(f"  xG: {lambda_home:.2f} – {lambda_away:.2f}")
+
+    # Value bet
+    parts.append("")
+    if is_value and best_outcome and kelly is not None:
+        names = {"home": home, "draw": "Draw", "away": away}
+        odds_str = (
+            f" @ {best_decimal_odds:.2f}" if best_decimal_odds and best_decimal_odds > 1 else ""
+        )
+        parts.append(
+            f"💡 <b>Bet: {names[best_outcome]}{odds_str}</b>"
+            f"  ·  Edge {best_edge:+.1%}"
+            f"  ·  ¼Kelly {kelly:.1%}"
+        )
+    elif market_probs:
+        parts.append(f"No value bet (threshold {min_edge:.0%})")
+
+    # Other markets
+    m = market_detail
+    parts.append("")
+    parts.append("<b>📈 Other Markets</b>")
+    parts.append(f"  Over 2.5: {m['over_2_5']:.0%}   BTTS: {m['btts_yes']:.0%}")
+    ah_m05, ah_p05 = m["ah_home_m0_5"], m["ah_home_p0_5"]
+    parts.append(f"  AH {home[:14]:<14}  −0.5: {ah_m05:.0%}   +0.5: {ah_p05:.0%}")
+    parts.append(f"  AH {away[:14]:<14}  −0.5: {1 - ah_p05:.0%}   +0.5: {1 - ah_m05:.0%}")
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Match building: synthesise the context columns that models expect
 # ---------------------------------------------------------------------------
 
@@ -506,6 +597,11 @@ def main(
         False,
         "--force-odds",
         help="Bypass the 15-minute odds cache and fetch fresh odds from the API (costs credits).",
+    ),
+    telegram: bool = typer.Option(
+        False,
+        "--telegram",
+        help="Output human-readable Telegram HTML instead of ASCII tables (used by the scheduler bot).",
     ),
 ) -> None:
     """Predict all upcoming WC 2026 matches and compare vs live odds.
@@ -914,8 +1010,82 @@ def main(
         market_detail_lines.append("")
 
     # ------------------------------------------------------------------
+    # 8b. Build Telegram blocks (only when --telegram flag is set)
+    # ------------------------------------------------------------------
+    telegram_blocks: list[str] = []
+
+    if telegram:
+        for i, row in enumerate(upcoming.itertuples(index=False)):
+            home = row.home_team
+            away = row.away_team
+            kickoff = row.date
+            prob_home = float(pred_batch["prob_home"].iloc[i])
+            prob_draw = float(pred_batch["prob_draw"].iloc[i])
+            prob_away = float(pred_batch["prob_away"].iloc[i])
+            lambda_home = float(pred_batch["lambda_home"].iloc[i])
+            lambda_away = float(pred_batch["lambda_away"].iloc[i])
+            grid = pred_batch["grid"].iloc[i]
+            m = derive_markets(grid)
+
+            _market_probs = None
+            _best_edge: float | None = None
+            _best_outcome: str | None = None
+            _best_decimal_odds: float | None = None
+            _kelly: float | None = None
+            _is_value = False
+
+            if has_api_key and live_odds:
+                odds_entry = _find_odds(home, away, odds_index)
+                if odds_entry is not None:
+                    raw_h = float(odds_entry["odds_home"])
+                    raw_d = float(odds_entry.get("odds_draw", 0.0))
+                    raw_a = float(odds_entry["odds_away"])
+                    if raw_d > 0.0 and np.isfinite(raw_d):
+                        raw_odds_dict = {"home": raw_h, "draw": raw_d, "away": raw_a}
+                        _market_probs = remove_margin(raw_odds_dict)
+                        edges = {
+                            "home": (prob_home - _market_probs["home"], raw_h),
+                            "draw": (prob_draw - _market_probs["draw"], raw_d),
+                            "away": (prob_away - _market_probs["away"], raw_a),
+                        }
+                        _best_outcome = max(edges, key=lambda k: edges[k][0])
+                        _best_edge, _best_decimal_odds = edges[_best_outcome]
+                        _is_value = _best_edge >= min_edge
+                        _kelly = (
+                            KELLY_FRACTION * _best_edge / _best_decimal_odds
+                            if _is_value and _best_decimal_odds > 1.0
+                            else 0.0
+                        )
+
+            block = _format_telegram_match(
+                home=home,
+                away=away,
+                kickoff=kickoff,
+                prob_home=prob_home,
+                prob_draw=prob_draw,
+                prob_away=prob_away,
+                lambda_home=lambda_home,
+                lambda_away=lambda_away,
+                market_detail=m,
+                market_probs=_market_probs,
+                best_edge=_best_edge,
+                best_outcome=_best_outcome,
+                best_decimal_odds=_best_decimal_odds,
+                kelly=_kelly,
+                is_value=_is_value,
+                fa_home=form_analyses.get(home),
+                fa_away=form_analyses.get(away),
+                min_edge=min_edge,
+            )
+            telegram_blocks.append(block)
+
+    # ------------------------------------------------------------------
     # 9. Flush all stdout at once
     # ------------------------------------------------------------------
+    if telegram:
+        typer.echo(("\n\n" + "—" * 32 + "\n\n").join(telegram_blocks))
+        return
+
     header = _header_with_odds() if (has_api_key and live_odds) else _header_no_odds()
     sep = _separator(len(header))
 

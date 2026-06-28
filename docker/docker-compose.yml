@@ -1,0 +1,21 @@
+services:
+  scheduler:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      # Trained checkpoint (read-only — training stays on bare metal)
+      - ../checkpoints:/app/checkpoints:ro
+      # Data cache shared with the host (schedule, odds snapshot, form log)
+      - ../data:/app/data
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      THE_ODDS_API_KEY: ${THE_ODDS_API_KEY}
+      # Point at the host's Ollama instance; host.docker.internal resolves via extra_hosts below
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      ADVANCE_MINUTES: ${ADVANCE_MINUTES:-60}
+    # Allows host.docker.internal to resolve on Linux (no-op on Mac/Windows)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

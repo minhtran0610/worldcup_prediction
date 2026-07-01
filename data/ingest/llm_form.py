@@ -42,6 +42,11 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import cast
+
+import pandas as pd
+
+from data.ingest import guardian_api
 
 _OLLAMA_BASE = _os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 _OLLAMA_TIMEOUT = 45  # seconds — allow for cold model load
@@ -181,7 +186,7 @@ def _fetch_rss(url: str) -> list[dict]:
     ]
 
 
-def _clean_html(text: str) -> str:
+def clean_html(text: str) -> str:
     """Strip tags and decode HTML entities."""
     text = re.sub(r"<[^>]+>", " ", text)
     text = html.unescape(text)
@@ -224,7 +229,7 @@ def _fetch_article_text(url: str) -> str:
         return ""
     # Collect <p> tags with enough content (≥60 chars after tag-stripping)
     paras = re.findall(r"<p[^>]*>(.*?)</p>", raw, re.DOTALL)
-    cleaned = [_clean_html(p) for p in paras]
+    cleaned = [clean_html(p) for p in paras]
     cleaned = [
         p
         for p in cleaned
@@ -311,7 +316,7 @@ def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[s
             continue
         title_lower = item["title"].lower()
         # Strip HTML before counting — Guardian descriptions embed team names in href attrs
-        desc_clean = _clean_html(item["description"]).lower()
+        desc_clean = clean_html(item["description"]).lower()
         in_title = any(term in title_lower for term in search_lower)
         # Description-only: require term appears at least twice in plain text to avoid noise
         if not in_title:
@@ -331,7 +336,7 @@ def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[s
         return [], []
 
     urls = [m["link"] for m in matched]
-    rss_descs = {m["link"]: _clean_html(m["title"] + ". " + m["description"]) for m in matched}
+    rss_descs = {m["link"]: clean_html(m["title"] + ". " + m["description"]) for m in matched}
 
     # BBC, Guardian, and ESPN: fetch full article body (<p> extraction works for all three).
     # Guardian and ESPN boilerplate is filtered in _fetch_article_text via _is_boilerplate().
@@ -358,6 +363,42 @@ def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[s
             texts.append(desc)
 
     texts = [t for t in texts if t]
+    return texts, urls
+
+
+def fetch_team_match_report(
+    team: str,
+    opponent: str,
+    match_date: pd.Timestamp,
+    api_key: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Fetch a post-match report for one specific completed match via the
+    Guardian Content API's archive search.
+
+    fetch_team_news (RSS-based) can't reach matches whose reports have
+    already rotated out of the live feed — this function exists for exactly
+    that case: retroactively recovering earlier WC2026 match reports.
+
+    Searches a 2-day window starting on match_date. Filters results to those
+    whose title mentions the team (via the existing _SEARCH_TERMS keyword
+    map) to reduce false positives from the Guardian's broader query match.
+    Returns ([], []) on no results or API failure.
+    """
+    query = f"{team} {opponent}"
+    to_date = cast(pd.Timestamp, match_date + pd.Timedelta(days=2))
+    articles = guardian_api.search_articles(query, match_date, to_date, api_key=api_key)
+
+    search_terms = [t.lower() for t in _SEARCH_TERMS.get(team, [team])]
+    texts: list[str] = []
+    urls: list[str] = []
+    for a in articles:
+        title_lower = a["title"].lower()
+        if not any(term in title_lower for term in search_terms):
+            continue
+        body = clean_html(a["body_html"])[:_MAX_COMBINED_CHARS]
+        if body:
+            texts.append(body)
+            urls.append(a["url"])
     return texts, urls
 
 

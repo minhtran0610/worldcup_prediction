@@ -29,7 +29,8 @@ def test_search_articles_returns_empty_without_api_key(monkeypatch):
 def test_search_articles_parses_response(monkeypatch):
     monkeypatch.setenv("GUARDIAN_API_KEY", "fake-key")
 
-    def fake_get(url, params=None, timeout=None):
+    def fake_get(url, params: dict | None = None, timeout=None):
+        assert params is not None
         assert params["q"] == "Spain Croatia"
         assert params["from-date"] == "2026-06-15"
         assert params["to-date"] == "2026-06-17"

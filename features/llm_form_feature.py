@@ -39,6 +39,11 @@ from __future__ import annotations
 K_SENTIMENT: float = 0.30
 MIN_CONFIDENCE: float = 0.25
 
+K_TRAJECTORY: float = 0.15
+TRAJECTORY_MIN_CONFIDENCE: float = 0.25
+_TRAJECTORY_FACTOR_MIN: float = 0.85
+_TRAJECTORY_FACTOR_MAX: float = 1.15
+
 
 def compute_sentiment_factor(
     form_score: float,
@@ -138,3 +143,52 @@ def build_sentiment_report_line(
     factor_str = f"λ×{factor:.3f}"
     absences_str = f"  absent: {', '.join(key_absences)}" if key_absences else ""
     return f"  {name}  form {direction}  conf {confidence:.2f}  {factor_str}{absences_str}"
+
+
+def compute_trajectory_factor(
+    analyses: list,
+    k: float = K_TRAJECTORY,
+    min_confidence: float = TRAJECTORY_MIN_CONFIDENCE,
+) -> float:
+    """Return a λ multiplier summarising a team's WC2026 match-by-match
+    trajectory (see data.ingest.trajectory.get_team_trajectory).
+
+    Confidence-weighted average of form_score across entries with
+    confidence >= min_confidence; entries below threshold are dropped
+    entirely (not zero-weighted) to avoid diluting real signal with noise.
+    Returns 1.0 (no adjustment) if no entries clear the confidence bar.
+
+    Clamped to a tighter range than compute_sentiment_factor's [0.70, 1.30]
+    — this is a secondary signal correlated with the same journalism-derived
+    narrative as the pre-match sentiment read, so its individual
+    contribution is kept modest to avoid double-counting the same
+    underlying "team is hot/cold" signal twice at full strength.
+    """
+    usable = [a for a in analyses if a.confidence >= min_confidence]
+    if not usable:
+        return 1.0
+
+    total_weight = sum(a.confidence for a in usable)
+    weighted_score = sum(a.form_score * a.confidence for a in usable) / total_weight
+
+    factor = 1.0 + k * weighted_score
+    return max(_TRAJECTORY_FACTOR_MIN, min(_TRAJECTORY_FACTOR_MAX, factor))
+
+
+def apply_trajectory_adjustment(
+    lambda_home: float,
+    lambda_away: float,
+    rho: float,
+    trajectory_factor_home: float,
+    trajectory_factor_away: float,
+) -> tuple[float, float, float]:
+    """Return (lambda_home_adj, lambda_away_adj, rho) after trajectory scaling.
+
+    rho passed through unchanged, matching apply_injury_adjustment and
+    apply_sentiment_adjustment. Apply AFTER apply_sentiment_adjustment —
+    the trajectory signal is coarser and should be layered on top of the
+    fresher pre-match read, not compete with it for primacy.
+    """
+    lh_adj = max(lambda_home * trajectory_factor_home, 0.01)
+    la_adj = max(lambda_away * trajectory_factor_away, 0.01)
+    return lh_adj, la_adj, rho

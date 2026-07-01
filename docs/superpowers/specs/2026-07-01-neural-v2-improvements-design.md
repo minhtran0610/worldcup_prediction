@@ -176,6 +176,16 @@ during CSV→parquet ingestion (before caching):
 Existing cached `data/raw/results.parquet` needs a `force_refresh` rebuild
 from the CSV to pick this up.
 
+**Addendum (found during planning):** `data/ingest/api_football.py` — the
+*primary* WC2026 source when `API_FOOTBALL_KEY` is configured, ahead of the
+openfootball fallback — has the same bug class. It reads the top-level
+`goals.home`/`goals.away` field from API-Football's fixture response, which
+reflects the score including extra time, instead of the `score.fulltime`
+breakdown the API also provides. Not currently active (no API key set in
+this environment today), but fixed alongside D as the same bug class in the
+same area of code, to prevent a silent regression if the key is configured
+later.
+
 ## Out of scope for this round
 
 - Reddit as a sentiment source (deferred, see research findings above).

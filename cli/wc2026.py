@@ -8,10 +8,12 @@ import numpy as np
 import pandas as pd
 import typer
 
+from data.ingest.guardian_api import get_api_key as get_guardian_api_key
 from data.ingest.injuries import fetch_wc2026_injuries
 from data.ingest.llm_form import get_all_matches_form
 from data.ingest.odds_live import fetch_upcoming_odds, get_api_key
 from data.ingest.results import drop_wc2026, load_results
+from data.ingest.trajectory import get_team_trajectory
 from data.ingest.wc2026 import load_wc2026_schedule
 from eval.backtest import KELLY_FRACTION
 from eval.metrics import remove_margin
@@ -23,8 +25,10 @@ from features.injury import (
 )
 from features.llm_form_feature import (
     apply_sentiment_adjustment,
+    apply_trajectory_adjustment,
     build_sentiment_report_line,
     compute_sentiment_factor,
+    compute_trajectory_factor,
 )
 from features.squad_registry import SquadRegistry
 from models.grid import build_grid, derive_markets
@@ -588,6 +592,11 @@ def main(
         help="Apply LLM narrative tournament-form adjustment (~2 min). On by default.",
     ),
     llm_model: str = typer.Option("qwen3.5:9b", help="Ollama model for LLM form analysis"),
+    trajectory: bool = typer.Option(
+        True,
+        "--trajectory/--no-trajectory",
+        help="Apply WC2026 match-by-match trajectory lambda adjustment (requires GUARDIAN_API_KEY).",
+    ),
     next_only: bool = typer.Option(
         False,
         "--next/--all",
@@ -651,6 +660,7 @@ def main(
     typer.echo("Fetching WC 2026 schedule (live)...", err=True)
     schedule = load_wc2026_schedule(force_refresh=True)
 
+    completed = schedule.iloc[0:0]
     if not schedule.empty:
         completed = (
             schedule[schedule["is_completed"]].dropna(subset=["home_score", "away_score"]).copy()
@@ -889,6 +899,55 @@ def main(
                 typer.echo(f"Sentiment adjustment applied to {n_sentiment} match(es).", err=True)
             else:
                 typer.echo("No sentiment signal above confidence threshold.", err=True)
+
+    # 7d. WC2026 match-by-match trajectory adjustment (requires GUARDIAN_API_KEY)
+    if trajectory and get_guardian_api_key():
+        typer.echo("Computing WC2026 trajectory adjustment...", err=True)
+        teams_in_play = list(
+            {t for row in upcoming.itertuples(index=False) for t in (row.home_team, row.away_team)}
+        )
+        trajectory_factors: dict[str, float] = {}
+        for team in teams_in_play:
+            team_matches = completed[
+                (completed["home_team"] == team) | (completed["away_team"] == team)
+            ]
+            if team_matches.empty:
+                trajectory_factors[team] = 1.0
+                continue
+            analyses = get_team_trajectory(team, team_matches)
+            trajectory_factors[team] = compute_trajectory_factor(analyses)
+
+        n_trajectory = 0
+        for i, uprow in enumerate(upcoming.itertuples(index=False)):
+            home, away = uprow.home_team, uprow.away_team
+            fh = trajectory_factors.get(home, 1.0)
+            fa = trajectory_factors.get(away, 1.0)
+            if fh == 1.0 and fa == 1.0:
+                continue
+
+            lh = float(pred_batch["lambda_home"].iloc[i])
+            la = float(pred_batch["lambda_away"].iloc[i])
+            rho = float(pred_batch["rho"].iloc[i])
+            lh_adj, la_adj, _ = apply_trajectory_adjustment(lh, la, rho, fh, fa)
+
+            grid_adj = build_grid(lh_adj, la_adj, rho)
+            markets = derive_markets(grid_adj)
+            goals = np.arange(grid_adj.shape[0], dtype=np.float64)
+
+            pred_batch.at[i, "lambda_home"] = lh_adj
+            pred_batch.at[i, "lambda_away"] = la_adj
+            pred_batch.at[i, "prob_home"] = markets["home_win"]
+            pred_batch.at[i, "prob_draw"] = markets["draw"]
+            pred_batch.at[i, "prob_away"] = markets["away_win"]
+            pred_batch.at[i, "expected_home"] = float(np.dot(goals, grid_adj.sum(axis=1)))
+            pred_batch.at[i, "expected_away"] = float(np.dot(goals, grid_adj.sum(axis=0)))
+            pred_batch.at[i, "grid"] = grid_adj
+            n_trajectory += 1
+
+        if n_trajectory:
+            typer.echo(f"Trajectory adjustment applied to {n_trajectory} match(es).", err=True)
+    elif trajectory:
+        typer.echo("GUARDIAN_API_KEY not set — skipping trajectory adjustment.", err=True)
 
     # ------------------------------------------------------------------
     # 8. Build output rows and market detail blocks (no printing yet)

@@ -73,8 +73,14 @@ def get_team_trajectory(
         key = _cache_key(team, opponent, match_date)
 
         if key in cache:
-            results.append(FormAnalysis.from_dict(cache[key]))
-            continue
+            try:
+                results.append(FormAnalysis.from_dict(cache[key]))
+                continue
+            except Exception:
+                # Cache entry is malformed (e.g. missing required 'team' key,
+                # wrong field types). Degrade gracefully by treating as cache
+                # miss and re-fetching.
+                pass
 
         texts, urls = fetch_team_match_report(team, opponent, match_date, api_key=api_key)
         analysis = analyse_team_form(team, texts, urls=urls, model=model)

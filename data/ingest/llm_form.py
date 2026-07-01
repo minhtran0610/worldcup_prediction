@@ -49,6 +49,8 @@ _BBC_WC_RSS = "https://feeds.bbci.co.uk/sport/football/world-cup/rss.xml"
 _BBC_SPORT_RSS = "https://feeds.bbci.co.uk/sport/football/rss.xml"
 _GUARDIAN_WC_RSS = "https://www.theguardian.com/football/world-cup-2026/rss"
 _GUARDIAN_FOOTBALL_RSS = "https://www.theguardian.com/football/rss"
+_ESPN_SOCCER_RSS = "https://www.espn.com/espn/rss/soccer/news"
+_FRANCE24_SPORT_RSS = "https://www.france24.com/en/sport/rss"
 _MAX_COMBINED_CHARS = 8000
 _ARTICLE_FETCH_WORKERS = 8
 
@@ -186,12 +188,33 @@ def _clean_html(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-_SUPPORTED_DOMAINS = ("bbc.", "theguardian.com")
+_BODY_FETCH_DOMAINS = ("bbc.", "theguardian.com", "espn.com")
+
+# Terms that indicate nav/JS boilerplate rather than article content.
+# Guardian and ESPN both embed UI snippets in <p> tags that slip past length filters.
+_BOILERPLATE_TERMS = frozenset(
+    {
+        "close dialogue",
+        "toggle caption",
+        "document.addeventlistener",
+        "veggieburger",
+        "print subscriptions",
+        "search jobs",
+    }
+)
+
+
+def _is_boilerplate(text: str) -> bool:
+    lower = text.lower()
+    # ESPN video-description paragraphs always start with "play "
+    if lower.startswith("play "):
+        return True
+    return any(term in lower for term in _BOILERPLATE_TERMS)
 
 
 def _fetch_article_text(url: str) -> str:
-    """Fetch full body text from a BBC Sport or Guardian article. Returns '' on failure."""
-    if not url or not any(d in url for d in _SUPPORTED_DOMAINS):
+    """Fetch full body text from a BBC, Guardian, or ESPN article. Returns '' on failure."""
+    if not url or not any(d in url for d in _BODY_FETCH_DOMAINS):
         return ""
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
@@ -209,6 +232,7 @@ def _fetch_article_text(url: str) -> str:
         and not p.startswith("BBC")
         and "cookie" not in p.lower()
         and "subscribe" not in p.lower()
+        and not _is_boilerplate(p)
     ]
     return " ".join(cleaned)[:_MAX_COMBINED_CHARS]
 
@@ -247,18 +271,27 @@ def fetch_match_news(home: str, away: str, max_articles: int = 12) -> tuple[list
 def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[str]]:
     """Return (texts, urls) — article bodies + source URLs for *team*.
 
-    Searches BBC WC RSS (primary) and BBC Sport RSS (secondary).
+    Searches BBC, Guardian, ESPN, and France24 RSS feeds.
     Filters by case-insensitive keyword match in title or description.
-    Fetches article bodies in parallel.
+    Fetches article bodies in parallel for BBC, Guardian, and ESPN.
+    France24 uses RSS descriptions (clean, sufficient length).
 
     Returns ([], []) if no articles found or on network failure.
     """
     search_terms = _SEARCH_TERMS.get(team, [team])
     search_lower = [s.lower() for s in search_terms]
 
-    # Fetch all RSS feeds; WC-specific feeds listed first (more relevant)
+    # WC-specific feeds first; broader feeds as fallback.
+    # ESPN and France24 provide form-focused match reports missing from BBC/Guardian.
     all_items: list[dict] = []
-    for rss_url in [_BBC_WC_RSS, _GUARDIAN_WC_RSS, _BBC_SPORT_RSS, _GUARDIAN_FOOTBALL_RSS]:
+    for rss_url in [
+        _BBC_WC_RSS,
+        _GUARDIAN_WC_RSS,
+        _ESPN_SOCCER_RSS,
+        _FRANCE24_SPORT_RSS,
+        _BBC_SPORT_RSS,
+        _GUARDIAN_FOOTBALL_RSS,
+    ]:
         all_items.extend(_fetch_rss(rss_url))
 
     # Deduplicate by URL and content fingerprint (same article, different URLs).
@@ -298,27 +331,28 @@ def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[s
         return [], []
 
     urls = [m["link"] for m in matched]
-    # RSS descriptions are clean summaries; always available regardless of domain.
-    # Guardian articles render via JS so full-page scraping returns nav boilerplate —
-    # use RSS description directly for non-BBC URLs.
     rss_descs = {m["link"]: _clean_html(m["title"] + ". " + m["description"]) for m in matched}
 
-    bbc_urls = [u for u in urls if "bbc." in u]
-    other_urls = [u for u in urls if "bbc." not in u]
+    # BBC, Guardian, and ESPN: fetch full article body (<p> extraction works for all three).
+    # Guardian and ESPN boilerplate is filtered in _fetch_article_text via _is_boilerplate().
+    # France24 and other sources: RSS description is clean and sufficient.
+    body_fetch_urls = [u for u in urls if any(d in u for d in _BODY_FETCH_DOMAINS)]
+    rss_only_urls = [u for u in urls if not any(d in u for d in _BODY_FETCH_DOMAINS)]
 
     texts: list[str] = []
 
-    # BBC: fetch full article body (works well with <p> extraction)
-    if bbc_urls:
-        with ThreadPoolExecutor(max_workers=min(_ARTICLE_FETCH_WORKERS, len(bbc_urls))) as exe:
-            future_to_url = {exe.submit(_fetch_article_text, url): url for url in bbc_urls}
+    if body_fetch_urls:
+        with ThreadPoolExecutor(
+            max_workers=min(_ARTICLE_FETCH_WORKERS, len(body_fetch_urls))
+        ) as exe:
+            future_to_url = {exe.submit(_fetch_article_text, url): url for url in body_fetch_urls}
             for future in as_completed(future_to_url):
                 url = future_to_url[future]
                 body = future.result()
+                # Fall back to RSS description if body extraction yielded too little
                 texts.append(body if len(body) >= 150 else rss_descs.get(url, ""))
 
-    # Non-BBC (Guardian etc.): use RSS description directly — it's a clean summary
-    for url in other_urls:
+    for url in rss_only_urls:
         desc = rss_descs.get(url, "")
         if desc:
             texts.append(desc)

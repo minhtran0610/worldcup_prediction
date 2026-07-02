@@ -15,7 +15,7 @@ from data.ingest.odds_live import fetch_upcoming_odds, get_api_key
 from data.ingest.results import drop_wc2026, load_results
 from data.ingest.trajectory import get_team_trajectory
 from data.ingest.wc2026 import inject_completed_wc2026_matches, load_wc2026_schedule
-from eval.backtest import KELLY_FRACTION
+from eval.backtest import KELLY_FRACTION, MIN_MARKET_PROB, MIN_RELATIVE_EDGE, select_value_bet
 from eval.metrics import remove_margin
 from features.context import WC_2026_HOSTS, derive_context
 from features.elo import compute_elo_ratings, get_current_ratings
@@ -530,6 +530,12 @@ def main(
         help="Neural checkpoint path (for neural/ensemble); loaded if present, else fits fresh",
     ),
     min_edge: float = typer.Option(0.02, help="Minimum edge to flag as value bet"),
+    min_market_prob: float = typer.Option(
+        MIN_MARKET_PROB, help="Minimum market-implied probability to consider for a value bet"
+    ),
+    min_relative_edge: float = typer.Option(
+        MIN_RELATIVE_EDGE, help="Minimum edge as a fraction of market probability"
+    ),
     show_all: bool = typer.Option(False, help="Show all matches, not just value bets"),
     injuries: bool = typer.Option(True, help="Apply injury/suspension λ adjustment"),
     injury_k: float = typer.Option(0.5, help="Injury dampening coefficient K (0–1)"),
@@ -940,15 +946,21 @@ def main(
             }
             market_probs = remove_margin(raw_odds_dict)
 
-            edges = {
-                "home": (prob_home - market_probs["home"], raw_odds_home),
-                "draw": (prob_draw - market_probs["draw"], raw_odds_draw),
-                "away": (prob_away - market_probs["away"], raw_odds_away),
-            }
-            best_outcome = max(edges, key=lambda k: edges[k][0])
-            best_edge, best_decimal_odds = edges[best_outcome]
-
-            is_value = best_edge >= min_edge
+            selection = select_value_bet(
+                prob_home,
+                prob_draw,
+                prob_away,
+                market_probs["home"],
+                market_probs["draw"],
+                market_probs["away"],
+                min_edge=min_edge,
+                min_market_prob=min_market_prob,
+                min_relative_edge=min_relative_edge,
+            )
+            best_outcome = selection["best_outcome"]
+            best_edge = selection["best_edge"]
+            is_value = selection["is_value"]
+            best_decimal_odds = raw_odds_dict[best_outcome]
 
             kelly = (
                 KELLY_FRACTION * best_edge / best_decimal_odds
@@ -1049,14 +1061,21 @@ def main(
                     if raw_d > 0.0 and np.isfinite(raw_d):
                         raw_odds_dict = {"home": raw_h, "draw": raw_d, "away": raw_a}
                         _market_probs = remove_margin(raw_odds_dict)
-                        edges = {
-                            "home": (prob_home - _market_probs["home"], raw_h),
-                            "draw": (prob_draw - _market_probs["draw"], raw_d),
-                            "away": (prob_away - _market_probs["away"], raw_a),
-                        }
-                        _best_outcome = max(edges, key=lambda k: edges[k][0])
-                        _best_edge, _best_decimal_odds = edges[_best_outcome]
-                        _is_value = _best_edge >= min_edge
+                        _selection = select_value_bet(
+                            prob_home,
+                            prob_draw,
+                            prob_away,
+                            _market_probs["home"],
+                            _market_probs["draw"],
+                            _market_probs["away"],
+                            min_edge=min_edge,
+                            min_market_prob=min_market_prob,
+                            min_relative_edge=min_relative_edge,
+                        )
+                        _best_outcome = _selection["best_outcome"]
+                        _best_edge = _selection["best_edge"]
+                        _is_value = _selection["is_value"]
+                        _best_decimal_odds = raw_odds_dict[_best_outcome]
                         _kelly = (
                             KELLY_FRACTION * _best_edge / _best_decimal_odds
                             if _is_value and _best_decimal_odds > 1.0

@@ -104,6 +104,35 @@ def test_own_goal_in_regulation_time_credited_correctly():
     assert row["away_score"] == 0
 
 
+def test_non_draw_correction_prints_warning(capsys):
+    """If the reconstructed 90-minute score is NOT a draw, a WARNING line
+    identifying the match must be printed to stderr — this is the signal a
+    human uses to distinguish a genuine two-legged extra-time tie from a
+    stoppage-time-goal misread (see module docstring)."""
+    results = pd.DataFrame([_results_row("2009-11-18", "France", "Rep. Ireland", 1, 1)])
+    goalscorers = pd.DataFrame(
+        [
+            _goal_row("2009-11-18", "France", "Rep. Ireland", "Rep. Ireland", 30),
+            _goal_row("2009-11-18", "France", "Rep. Ireland", "France", 60),
+            _goal_row("2009-11-18", "France", "Rep. Ireland", "France", 40),
+            _goal_row("2009-11-18", "France", "Rep. Ireland", "France", 103),
+        ]
+    )
+    out = correct_extra_time_scores(results, goalscorers)
+    row = out.iloc[0]
+    assert row["home_score"] == 2
+    assert row["away_score"] == 1
+
+    captured = capsys.readouterr()
+    warning_lines = [
+        line for line in captured.err.splitlines() if line.startswith("[extra_time] WARNING")
+    ]
+    assert len(warning_lines) == 1
+    assert "France" in warning_lines[0]
+    assert "Rep. Ireland" in warning_lines[0]
+    assert "1-1 -> 2-1" in warning_lines[0]
+
+
 def test_multiple_matches_only_et_ones_corrected():
     """With several matches in the frame, only the one with an ET goal changes."""
     results = pd.DataFrame(

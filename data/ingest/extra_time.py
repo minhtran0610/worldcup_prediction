@@ -34,6 +34,16 @@ def correct_extra_time_scores(results: pd.DataFrame, goalscorers: pd.DataFrame) 
     the `team` column (verified: Argentina 1-0 Chile, 1917 — the sole goal
     row is team=Argentina, own_goal=True, scored by a Chilean player), so no
     special-casing for own goals is needed.
+
+    Known false-positive class: goalscorers.csv's minute column has a tail
+    at 91-96 that mixes genuine early-extra-time goals with 2nd-half
+    stoppage-time goals recorded literally (e.g. "90+3" stored as 93). A
+    single-leg match can only reach extra time if it is level at 90 minutes,
+    so any correction that produces a NON-DRAW 90-minute score for a match
+    that isn't a two-legged tie is almost certainly this misread, not a
+    genuine ET case. We do not attempt to detect two-legged ties here (no
+    reliable signal in this data) — instead we just warn loudly on every
+    non-draw correction so a human can eyeball it.
     """
     gs = goalscorers.copy()
     gs["date"] = pd.to_datetime(gs["date"])
@@ -59,6 +69,7 @@ def correct_extra_time_scores(results: pd.DataFrame, goalscorers: pd.DataFrame) 
     )
 
     n_corrected = 0
+    non_draw_warnings: list[str] = []
     for date, home, away in et_keys:
         mask = (out["date"] == date) & (out["home_team"] == home) & (out["away_team"] == away)
         if not mask.any():
@@ -79,9 +90,24 @@ def correct_extra_time_scores(results: pd.DataFrame, goalscorers: pd.DataFrame) 
         new_home_score = int(home_rows["n"].iloc[0]) if len(home_rows) else 0
         new_away_score = int(away_rows["n"].iloc[0]) if len(away_rows) else 0
 
+        old_home_score = out.loc[mask, "home_score"].iloc[0]
+        old_away_score = out.loc[mask, "away_score"].iloc[0]
+
         out.loc[mask, "home_score"] = new_home_score
         out.loc[mask, "away_score"] = new_away_score
         n_corrected += 1
+
+        if new_home_score != new_away_score:
+            date_str = pd.Timestamp(date).date().isoformat()
+            non_draw_warnings.append(
+                f"[extra_time] WARNING: non-draw correction for {date_str} {home} vs {away}: "
+                f"{old_home_score}-{old_away_score} -> {new_home_score}-{new_away_score} "
+                "(verify this is a genuine two-legged extra-time tie, not a "
+                "stoppage-time-goal misread)"
+            )
+
+    for warning in non_draw_warnings:
+        print(warning, file=sys.stderr)
 
     print(
         f"[extra_time] Corrected {n_corrected} match(es) to 90-minute regulation score.",

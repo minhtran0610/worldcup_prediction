@@ -12,6 +12,8 @@ VAL_DURATION_MONTHS: int = 6
 STEP_MONTHS: int = 6
 KELLY_FRACTION: float = 0.25
 MIN_EDGE: float = 0.02
+MIN_MARKET_PROB: float = 0.08
+MIN_RELATIVE_EDGE: float = 0.30
 
 
 @dataclass
@@ -57,6 +59,58 @@ def generate_folds(
         val_start = val_start + pd.DateOffset(months=step_months)
 
     return folds
+
+
+def select_value_bet(
+    prob_home: float,
+    prob_draw: float,
+    prob_away: float,
+    market_home: float,
+    market_draw: float,
+    market_away: float,
+    min_edge: float = MIN_EDGE,
+    min_market_prob: float = MIN_MARKET_PROB,
+    min_relative_edge: float = MIN_RELATIVE_EDGE,
+) -> dict:
+    """Return the best-edge outcome for one match and whether it clears all
+    value-bet gates.
+
+    Three gates must ALL pass for is_value to be True:
+      1. best_edge >= min_edge                             (absolute edge, pp)
+      2. best_market_prob >= min_market_prob                (favorite-longshot floor)
+      3. best_edge / best_market_prob >= min_relative_edge  (relative edge)
+
+    The floor and relative-edge gates exist because the favorite-longshot
+    bias means bookmakers already price longshots ABOVE their true
+    probability — a model claiming e.g. 9% against a 6% market price is much
+    more likely to be uncalibrated at the tail than to have found real value.
+    A flat probability-point edge treats that case identically to a
+    well-supported 42%-vs-39% edge, which is the wrong shape of test.
+
+    NaN market probabilities (no odds available) always yield is_value=False.
+    """
+    edges = {
+        "home": prob_home - market_home,
+        "draw": prob_draw - market_draw,
+        "away": prob_away - market_away,
+    }
+    markets = {"home": market_home, "draw": market_draw, "away": market_away}
+
+    best_outcome = max(edges, key=lambda k: edges[k])
+    best_edge = edges[best_outcome]
+    best_market_prob = markets[best_outcome]
+
+    passes_abs = best_edge >= min_edge
+    passes_floor = best_market_prob >= min_market_prob
+    passes_relative = best_market_prob > 0 and (best_edge / best_market_prob) >= min_relative_edge
+    is_value = bool(passes_abs and passes_floor and passes_relative)
+
+    return {
+        "best_outcome": best_outcome,
+        "best_edge": best_edge,
+        "best_market_prob": best_market_prob,
+        "is_value": is_value,
+    }
 
 
 def compute_value_bets(

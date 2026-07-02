@@ -39,8 +39,9 @@ def main(
         typer.echo(f"Error: {exc}", err=False)
         raise typer.Exit(1)
 
-    # Keep WC 2026 out of the trained weights — the net should learn general
-    # football, and WC form enters at predict time via runtime form/Elo context.
+    # Drop the unreliable Kaggle-sourced 2026 rows first — verified completed
+    # WC2026 matches are re-injected below from the live schedule instead,
+    # then heavily boosted via sample_weight (see compute_sample_weight).
     n_before = len(results)
     results = drop_wc2026(results)
     n_dropped = n_before - len(results)

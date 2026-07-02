@@ -137,6 +137,9 @@ class XGBModel:
         y_home = results["home_score"].to_numpy(dtype=np.float64)
         y_away = results["away_score"].to_numpy(dtype=np.float64)
 
+        # sample_weight now carries recency decay + a WC2026 boost (see
+        # features.context.compute_sample_weight) — this baseline shares that
+        # column with the neural model, so its training basis moves too.
         weights: np.ndarray | None = None
         if "sample_weight" in results.columns:
             weights = results["sample_weight"].to_numpy(dtype=np.float64)

@@ -80,6 +80,22 @@ def _empty_df() -> pd.DataFrame:
     )
 
 
+def _extract_fulltime_score(fx: dict) -> tuple[int | None, int | None]:
+    """Return the 90-minute regulation score from an API-Football fixture object.
+
+    Uses score.fulltime rather than the top-level `goals` field — `goals`
+    reflects the match's final result including extra time for matches that
+    went there, while score.fulltime is the clean 90-minute score that 1X2
+    betting markets settle on.
+    """
+    fulltime: dict = (fx.get("score") or {}).get("fulltime") or {}
+    raw_home = fulltime.get("home")
+    raw_away = fulltime.get("away")
+    home_score = int(raw_home) if raw_home is not None else None
+    away_score = int(raw_away) if raw_away is not None else None
+    return home_score, away_score
+
+
 def fetch_wc2026_fixtures(api_key: str | None = None) -> pd.DataFrame:
     """Fetch all WC 2026 fixtures from API-Football (league=1, season=2026).
 
@@ -149,7 +165,6 @@ def fetch_wc2026_fixtures(api_key: str | None = None) -> pd.DataFrame:
     for fx in fixtures:
         fixture_info: dict = fx.get("fixture", {})
         teams: dict = fx.get("teams", {})
-        goals: dict = fx.get("goals", {})
         league_info: dict = fx.get("league", {})
 
         status_short: str = fixture_info.get("status", {}).get("short", "")
@@ -159,10 +174,7 @@ def fetch_wc2026_fixtures(api_key: str | None = None) -> pd.DataFrame:
         home = _normalise_team(teams.get("home", {}).get("name", ""))
         away = _normalise_team(teams.get("away", {}).get("name", ""))
 
-        raw_home_score = goals.get("home")
-        raw_away_score = goals.get("away")
-        home_score: int | None = int(raw_home_score) if raw_home_score is not None else None
-        away_score: int | None = int(raw_away_score) if raw_away_score is not None else None
+        home_score, away_score = _extract_fulltime_score(fx)
 
         stage: str = league_info.get("round", "Group Stage")
         venue: str = fixture_info.get("venue", {}).get("name", "") or ""

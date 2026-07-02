@@ -430,10 +430,18 @@ def test_neural_fit_respects_nonuniform_sample_weight_without_crashing():
 
 def test_neural_fit_handles_nan_sample_weight_gracefully():
     """fit() must handle NaN values in sample_weight column without crashing,
-    replacing them with neutral weight 1.0 and producing valid predictions."""
+    replacing them with neutral weight 1.0 and producing valid predictions.
+
+    NaN rows are placed in the TRAIN split (not val) so the guard in train_weights
+    construction is actually exercised. With 120 rows, n_val=12, so train is indices 0-107.
+    We place NaN at indices 50-51, which lands in train and triggers the guard.
+    """
     results = make_results(120)
-    # Set a few sample_weight values to NaN
-    results["sample_weight"] = [1.0] * 118 + [float("nan"), float("nan")]
+    # Create sample_weight with NaN in the TRAIN split (indices 50-51)
+    weights = [1.0] * 120
+    weights[50] = float("nan")
+    weights[51] = float("nan")
+    results["sample_weight"] = weights
     model = _small_model()
     # Should not raise despite NaN values
     model.fit(results)

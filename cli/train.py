@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 import typer
 
-from data.ingest.results import drop_wc2026, load_results
+from data.ingest.results import drop_wc2026, is_wc2026_match, load_results
+from data.ingest.wc2026 import inject_completed_wc2026_matches, load_wc2026_schedule
 from eval.metrics import aggregate_rps
-from features.context import derive_context
+from features.context import compute_sample_weight, derive_context
 from features.elo import compute_elo_ratings
 from features.squad_registry import SquadRegistry
 from models.neural import NeuralModel
@@ -52,6 +53,24 @@ def main(
     registry = SquadRegistry.build()
     results = derive_context(results, squad_registry=registry)
 
+    typer.echo("Fetching WC 2026 schedule (live) to inject completed matches...", err=True)
+    schedule = load_wc2026_schedule(force_refresh=True)
+    if not schedule.empty:
+        completed = (
+            schedule[schedule["is_completed"]].dropna(subset=["home_score", "away_score"]).copy()
+        )
+        if not completed.empty:
+            completed["home_score"] = completed["home_score"].astype(int)
+            completed["away_score"] = completed["away_score"].astype(int)
+            n_before = len(results)
+            results = inject_completed_wc2026_matches(results, completed, registry)
+            results["sample_weight"] = compute_sample_weight(results)
+            typer.echo(
+                f"Injected {len(results) - n_before} completed WC 2026 match(es) into training "
+                "data; sample_weight recomputed over the full merged frame.",
+                err=True,
+            )
+
     if tournament_filter is not None:
         results = results[results["tournament"] == tournament_filter].reset_index(drop=True)
 
@@ -59,10 +78,16 @@ def main(
         typer.echo("No data after filtering — check tournament_filter.", err=False)
         raise typer.Exit(1)
 
-    # 2. Chronological train/val split
+    # 2. Chronological train/val split — WC2026 rows always stay in train.
+    # They're deliberately boosted via sample_weight (see compute_sample_weight)
+    # so early-stopping on a genuinely held-out historical window still means
+    # something; holding them out here would defeat the point of the boost,
+    # and there are only ~80 of them, too few to be a meaningful val window
+    # on their own anyway.
     cutoff: pd.Timestamp = results["date"].max() - pd.DateOffset(months=val_months)
-    train_df = results[results["date"] < cutoff].reset_index(drop=True)
-    val_df = results[results["date"] >= cutoff].reset_index(drop=True)
+    is_wc26 = is_wc2026_match(results)
+    train_df = results[(results["date"] < cutoff) | is_wc26].reset_index(drop=True)
+    val_df = results[(results["date"] >= cutoff) & (~is_wc26)].reset_index(drop=True)
 
     if train_df.empty:
         typer.echo(

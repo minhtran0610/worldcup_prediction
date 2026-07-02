@@ -143,6 +143,21 @@ def compute_value_bets(
     """
     df = predictions.copy()
 
+    # Guard against empty DataFrame: return early with all expected columns.
+    if df.empty:
+        df["margin_home"] = pd.Series(dtype="float64")
+        df["margin_draw"] = pd.Series(dtype="float64")
+        df["margin_away"] = pd.Series(dtype="float64")
+        df["best_edge_outcome"] = pd.Series(dtype="object")
+        df["best_edge"] = pd.Series(dtype="float64")
+        df["best_market_prob"] = pd.Series(dtype="float64")
+        df["is_value"] = pd.Series(dtype="bool")
+        df["kelly_stake"] = pd.Series(dtype="float64")
+        df["outcome_won"] = pd.Series(dtype="bool")
+        df["flat_return"] = pd.Series(dtype="float64")
+        df["kelly_return"] = pd.Series(dtype="float64")
+        return df
+
     has_odds = all(c in df.columns for c in ("odds_home", "odds_draw", "odds_away"))
 
     if has_odds:

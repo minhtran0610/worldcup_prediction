@@ -379,3 +379,39 @@ def test_select_value_bet_handles_nan_market_probs():
         market_away=math.nan,
     )
     assert result["is_value"] is False
+
+
+def test_compute_value_bets_empty_dataframe_no_crash():
+    """Calling compute_value_bets with a zero-row DataFrame must not raise
+    and must return an empty DataFrame with all expected output columns.
+
+    This guards against KeyError from .apply(..., result_type='expand')
+    on empty frames, which never invokes the row lambda and produces no columns.
+    """
+    # Build an empty DataFrame with required input columns.
+    empty_df = pd.DataFrame(
+        {
+            "prob_home": pd.Series(dtype="float64"),
+            "prob_draw": pd.Series(dtype="float64"),
+            "prob_away": pd.Series(dtype="float64"),
+            "home_score": pd.Series(dtype="int64"),
+            "away_score": pd.Series(dtype="int64"),
+        }
+    )
+
+    # Should not raise.
+    result = compute_value_bets(empty_df)
+
+    # Result must be empty and have all expected output columns.
+    assert result.empty
+    assert "margin_home" in result.columns
+    assert "margin_draw" in result.columns
+    assert "margin_away" in result.columns
+    assert "best_edge_outcome" in result.columns
+    assert "best_edge" in result.columns
+    assert "best_market_prob" in result.columns
+    assert "is_value" in result.columns
+    assert "kelly_stake" in result.columns
+    assert "outcome_won" in result.columns
+    assert "flat_return" in result.columns
+    assert "kelly_return" in result.columns

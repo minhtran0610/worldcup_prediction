@@ -5,7 +5,13 @@ from pathlib import Path
 import typer
 
 from data.ingest.results import load_results
-from eval.backtest import KELLY_FRACTION, MIN_EDGE
+from eval.backtest import (
+    KELLY_FRACTION,
+    MIN_EDGE,
+    MIN_MARKET_PROB,
+    MIN_RELATIVE_EDGE,
+    select_value_bet,
+)
 from eval.metrics import remove_margin
 from features.context import derive_context
 from features.elo import compute_elo_ratings
@@ -102,13 +108,23 @@ def main(
             edge_draw = markets["draw"] - market_probs["draw"]
             edge_away = markets["away_win"] - market_probs["away"]
 
-            edges = {
-                "home": (edge_home, odds_home),
-                "draw": (edge_draw, odds_draw),
-                "away": (edge_away, odds_away),
-            }
-            best_outcome = max(edges, key=lambda k: edges[k][0])
-            best_edge, best_decimal_odds = edges[best_outcome]
+            selection = select_value_bet(
+                markets["home_win"],
+                markets["draw"],
+                markets["away_win"],
+                market_probs["home"],
+                market_probs["draw"],
+                market_probs["away"],
+                min_edge=MIN_EDGE,
+                min_market_prob=MIN_MARKET_PROB,
+                min_relative_edge=MIN_RELATIVE_EDGE,
+            )
+            best_outcome = selection["best_outcome"]
+            best_edge = selection["best_edge"]
+            is_value = selection["is_value"]
+            best_decimal_odds = {"home": odds_home, "draw": odds_draw, "away": odds_away}[
+                best_outcome
+            ]
 
             typer.echo("")
             typer.echo("  --- vs market (margin-removed) ---")
@@ -126,7 +142,7 @@ def main(
             label = best_outcome.capitalize()
             ev_pct = best_edge / market_probs[best_outcome] * 100
 
-            if best_edge >= MIN_EDGE:
+            if is_value:
                 kelly_pct = KELLY_FRACTION * best_edge / best_decimal_odds * 100
                 typer.echo(
                     f"  Best:  {label} {best_edge * 100:+.1f}pp -> EV {ev_pct:+.1f}%  [value]"
@@ -167,13 +183,23 @@ def main(
             edge_draw = probs["draw"] - market_probs["draw"]
             edge_away = probs["away_win"] - market_probs["away"]
 
-            edges = {
-                "home": (edge_home, odds_home),
-                "draw": (edge_draw, odds_draw),
-                "away": (edge_away, odds_away),
-            }
-            best_outcome = max(edges, key=lambda k: edges[k][0])
-            best_edge, best_decimal_odds = edges[best_outcome]
+            selection = select_value_bet(
+                probs["home_win"],
+                probs["draw"],
+                probs["away_win"],
+                market_probs["home"],
+                market_probs["draw"],
+                market_probs["away"],
+                min_edge=MIN_EDGE,
+                min_market_prob=MIN_MARKET_PROB,
+                min_relative_edge=MIN_RELATIVE_EDGE,
+            )
+            best_outcome = selection["best_outcome"]
+            best_edge = selection["best_edge"]
+            is_value = selection["is_value"]
+            best_decimal_odds = {"home": odds_home, "draw": odds_draw, "away": odds_away}[
+                best_outcome
+            ]
 
             typer.echo("")
             typer.echo("  --- vs market (margin-removed) ---")
@@ -191,7 +217,7 @@ def main(
             label = best_outcome.capitalize()
             ev_pct = best_edge / market_probs[best_outcome] * 100
 
-            if best_edge >= MIN_EDGE:
+            if is_value:
                 kelly_pct = KELLY_FRACTION * best_edge / best_decimal_odds * 100
                 typer.echo(
                     f"  Best:  {label} {best_edge * 100:+.1f}pp -> EV {ev_pct:+.1f}%  [value]"
@@ -295,13 +321,23 @@ def main(
             edge_home = markets["home_win"] - market_probs["home"]
             edge_draw = markets["draw"] - market_probs["draw"]
             edge_away = markets["away_win"] - market_probs["away"]
-            edges = {
-                "home": (edge_home, odds_home),
-                "draw": (edge_draw, odds_draw),
-                "away": (edge_away, odds_away),
-            }
-            best_outcome = max(edges, key=lambda k: edges[k][0])
-            best_edge, best_decimal_odds = edges[best_outcome]
+            selection = select_value_bet(
+                markets["home_win"],
+                markets["draw"],
+                markets["away_win"],
+                market_probs["home"],
+                market_probs["draw"],
+                market_probs["away"],
+                min_edge=MIN_EDGE,
+                min_market_prob=MIN_MARKET_PROB,
+                min_relative_edge=MIN_RELATIVE_EDGE,
+            )
+            best_outcome = selection["best_outcome"]
+            best_edge = selection["best_edge"]
+            is_value = selection["is_value"]
+            best_decimal_odds = {"home": odds_home, "draw": odds_draw, "away": odds_away}[
+                best_outcome
+            ]
             typer.echo("")
             typer.echo("  --- vs market (margin-removed) ---")
             typer.echo(
@@ -316,7 +352,7 @@ def main(
             )
             label = best_outcome.capitalize()
             ev_pct = best_edge / market_probs[best_outcome] * 100
-            if best_edge >= MIN_EDGE:
+            if is_value:
                 kelly_pct = KELLY_FRACTION * best_edge / best_decimal_odds * 100
                 typer.echo(
                     f"  Best:  {label} {best_edge * 100:+.1f}pp -> EV {ev_pct:+.1f}%  [value]"

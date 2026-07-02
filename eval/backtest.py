@@ -116,6 +116,8 @@ def select_value_bet(
 def compute_value_bets(
     predictions: pd.DataFrame,
     min_edge: float = MIN_EDGE,
+    min_market_prob: float = MIN_MARKET_PROB,
+    min_relative_edge: float = MIN_RELATIVE_EDGE,
 ) -> pd.DataFrame:
     """Filter predictions to value bets and compute staking columns.
 
@@ -126,15 +128,18 @@ def compute_value_bets(
 
     Adds columns:
         margin_home, margin_draw, margin_away
-        edge_home, edge_draw, edge_away
         best_edge_outcome (str: "home"/"draw"/"away")
         best_edge (float)
+        best_market_prob (float)
         kelly_stake (float)
         outcome_won (bool)
         flat_return (float)
         kelly_return (float)
 
-    Returns only rows where best_edge >= min_edge.
+    Returns only rows where select_value_bet() flags is_value=True — i.e.
+    where the absolute edge, market-probability floor, and relative-edge
+    gates all pass. See select_value_bet() docstring for why a flat
+    probability-point edge alone is insufficient.
     """
     df = predictions.copy()
 
@@ -160,17 +165,27 @@ def compute_value_bets(
         df["margin_draw"] = np.nan
         df["margin_away"] = np.nan
 
-    df["edge_home"] = df["prob_home"] - df["margin_home"]
-    df["edge_draw"] = df["prob_draw"] - df["margin_draw"]
-    df["edge_away"] = df["prob_away"] - df["margin_away"]
+    selections = df.apply(
+        lambda row: select_value_bet(
+            row["prob_home"],
+            row["prob_draw"],
+            row["prob_away"],
+            row["margin_home"],
+            row["margin_draw"],
+            row["margin_away"],
+            min_edge=min_edge,
+            min_market_prob=min_market_prob,
+            min_relative_edge=min_relative_edge,
+        ),
+        axis=1,
+        result_type="expand",
+    )
+    df["best_edge_outcome"] = selections["best_outcome"]
+    df["best_edge"] = selections["best_edge"]
+    df["best_market_prob"] = selections["best_market_prob"]
+    df["is_value"] = selections["is_value"]
 
-    edges = df[["edge_home", "edge_draw", "edge_away"]].values
-    best_idx = np.argmax(edges, axis=1)
-    outcome_names = np.array(["home", "draw", "away"])
-    df["best_edge_outcome"] = outcome_names[best_idx]
-    df["best_edge"] = edges[np.arange(len(df)), best_idx]
-
-    df = df[df["best_edge"] >= min_edge].copy()
+    df = df[df["is_value"]].copy()
 
     if has_odds and len(df) > 0:
         odds_map = {"home": "odds_home", "draw": "odds_draw", "away": "odds_away"}

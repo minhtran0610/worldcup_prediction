@@ -207,9 +207,9 @@ def test_compute_value_bets_no_odds_returns_empty_or_nan():
 def test_compute_value_bets_outcome_won_home_correct():
     """outcome_won=True when the predicted outcome (home) actually occurred."""
     df = _make_predictions_with_odds(
-        prob_home=0.70,  # large edge on home
-        prob_draw=0.15,
-        prob_away=0.15,
+        prob_home=0.75,  # large edge on home, clears the relative-edge gate too
+        prob_draw=0.13,
+        prob_away=0.12,
         odds_home=1.80,
         odds_draw=4.00,
         odds_away=5.00,
@@ -224,9 +224,9 @@ def test_compute_value_bets_outcome_won_home_correct():
 def test_compute_value_bets_outcome_won_away_correct():
     """outcome_won=False when the predicted outcome (home) did NOT occur."""
     df = _make_predictions_with_odds(
-        prob_home=0.70,
-        prob_draw=0.15,
-        prob_away=0.15,
+        prob_home=0.75,  # large edge on home, clears the relative-edge gate too
+        prob_draw=0.13,
+        prob_away=0.12,
         odds_home=1.80,
         odds_draw=4.00,
         odds_away=5.00,

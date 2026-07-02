@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import re
 from io import StringIO
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from data.ingest.cache import load_cache, save_cache
+from features.context import WC_2026_HOSTS
+from features.elo import extend_elo_through_matches
+
+if TYPE_CHECKING:
+    from features.squad_registry import SquadRegistry
 
 WC2026_WIKI_URL: str = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup"
 
@@ -417,3 +423,80 @@ def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
         print(f"[wc2026] WARNING: could not save cache — {exc}")
 
     return df
+
+
+WC2026_KNOCKOUT_START: pd.Timestamp = pd.Timestamp("2026-06-28")  # ty: ignore[invalid-assignment]
+
+
+def _is_knockout_stage(dates: pd.Series) -> pd.Series:
+    """True for matches on/after the WC2026 knockout start date.
+
+    Date-based rather than parsing the `stage` string: schedule sources
+    disagree on stage-string format (openfootball gives "Round of 32" etc.,
+    the Wikipedia scrape fallback always writes "Group"), but the WC2026
+    knockout start date is fixed and known — Round of 32 began 2026-06-28
+    with South Africa vs Canada, the day after the group stage's final
+    matchday (2026-06-27).
+    """
+    return dates >= WC2026_KNOCKOUT_START
+
+
+def inject_completed_wc2026_matches(
+    results: pd.DataFrame,
+    completed: pd.DataFrame,
+    registry: SquadRegistry,
+) -> pd.DataFrame:
+    """Fold completed WC2026 matches into a results/context DataFrame.
+
+    Adds Elo (carried forward from `results`'s end-state), squad-quality
+    features, and context columns (is_knockout, is_host_*, rest_days, a
+    sample_weight placeholder) so the merged frame matches the schema
+    NeuralModel / XGBModel / derive_context-produced frames expect.
+
+    `completed` must have: date, home_team, away_team, home_score, away_score.
+
+    sample_weight is set to a 1.0 placeholder here — callers that need the
+    recency/WC2026-boosted weight (see features.context.compute_sample_weight)
+    should recompute it over the full merged frame after calling this
+    function, so the boost is based on the true post-injection latest date.
+    """
+    to_inject = completed.copy()
+    if to_inject.empty:
+        return results
+
+    to_inject["date"] = to_inject["date"].fillna(pd.Timestamp("2026-06-11"))
+    to_inject = to_inject.sort_values("date").reset_index(drop=True)
+    to_inject["neutral"] = True
+    to_inject["tournament"] = "FIFA World Cup"
+    to_inject = extend_elo_through_matches(results, to_inject)
+    to_inject["country"] = "United States"
+    to_inject["is_knockout"] = _is_knockout_stage(to_inject["date"])
+    to_inject["is_host_home"] = to_inject["home_team"].isin(WC_2026_HOSTS)
+    to_inject["is_host_away"] = to_inject["away_team"].isin(WC_2026_HOSTS)
+    to_inject["rest_days_home"] = 7.0
+    to_inject["rest_days_away"] = 7.0
+    to_inject["sample_weight"] = 1.0
+    for col in [
+        "squad_top5_home",
+        "squad_top5_away",
+        "squad_caps_home",
+        "squad_caps_away",
+        "squad_goals_home",
+        "squad_goals_away",
+    ]:
+        to_inject[col] = 0.0
+    for i, wc_row in to_inject.iterrows():
+        fh = registry.get_features(wc_row["home_team"], 2026, "FIFA World Cup")
+        fa = registry.get_features(wc_row["away_team"], 2026, "FIFA World Cup")
+        to_inject.at[i, "squad_top5_home"] = fh["top5_share"]
+        to_inject.at[i, "squad_top5_away"] = fa["top5_share"]
+        to_inject.at[i, "squad_caps_home"] = fh["avg_caps_norm"]
+        to_inject.at[i, "squad_caps_away"] = fa["avg_caps_norm"]
+        to_inject.at[i, "squad_goals_home"] = fh["intl_goals_per_cap"]
+        to_inject.at[i, "squad_goals_away"] = fa["intl_goals_per_cap"]
+
+    return (
+        pd.concat([results, to_inject], ignore_index=True)
+        .sort_values("date")
+        .reset_index(drop=True)
+    )

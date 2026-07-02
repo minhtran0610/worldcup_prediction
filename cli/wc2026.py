@@ -14,11 +14,11 @@ from data.ingest.llm_form import get_all_matches_form
 from data.ingest.odds_live import fetch_upcoming_odds, get_api_key
 from data.ingest.results import drop_wc2026, load_results
 from data.ingest.trajectory import get_team_trajectory
-from data.ingest.wc2026 import load_wc2026_schedule
+from data.ingest.wc2026 import inject_completed_wc2026_matches, load_wc2026_schedule
 from eval.backtest import KELLY_FRACTION
 from eval.metrics import remove_margin
 from features.context import WC_2026_HOSTS, derive_context
-from features.elo import compute_elo_ratings, extend_elo_through_matches, get_current_ratings
+from features.elo import compute_elo_ratings, get_current_ratings
 from features.injury import (
     apply_injury_adjustment,
     compute_injury_strength_loss,
@@ -445,59 +445,6 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
 
 
 # ---------------------------------------------------------------------------
-# Completed-match injection helper
-# ---------------------------------------------------------------------------
-
-
-def _inject_completed_wc_matches(
-    results: pd.DataFrame,
-    completed: pd.DataFrame,
-    registry: SquadRegistry,
-) -> pd.DataFrame:
-    """Inject all completed WC matches into training context and return updated results."""
-    to_inject = completed.copy()
-    if to_inject.empty:
-        return results
-
-    to_inject["date"] = to_inject["date"].fillna(pd.Timestamp("2026-06-11"))
-    to_inject = to_inject.sort_values("date").reset_index(drop=True)
-    to_inject["neutral"] = True
-    to_inject["tournament"] = "FIFA World Cup"
-    to_inject = extend_elo_through_matches(results, to_inject)
-    to_inject["country"] = "United States"
-    to_inject["is_knockout"] = True
-    to_inject["is_host_home"] = to_inject["home_team"].isin(WC_2026_HOSTS)
-    to_inject["is_host_away"] = to_inject["away_team"].isin(WC_2026_HOSTS)
-    to_inject["rest_days_home"] = 7.0
-    to_inject["rest_days_away"] = 7.0
-    to_inject["sample_weight"] = 1.0
-    for col in [
-        "squad_top5_home",
-        "squad_top5_away",
-        "squad_caps_home",
-        "squad_caps_away",
-        "squad_goals_home",
-        "squad_goals_away",
-    ]:
-        to_inject[col] = 0.0
-    for i, wc_row in to_inject.iterrows():
-        fh = registry.get_features(wc_row["home_team"], 2026, "FIFA World Cup")
-        fa = registry.get_features(wc_row["away_team"], 2026, "FIFA World Cup")
-        to_inject.at[i, "squad_top5_home"] = fh["top5_share"]
-        to_inject.at[i, "squad_top5_away"] = fa["top5_share"]
-        to_inject.at[i, "squad_caps_home"] = fh["avg_caps_norm"]
-        to_inject.at[i, "squad_caps_away"] = fa["avg_caps_norm"]
-        to_inject.at[i, "squad_goals_home"] = fh["intl_goals_per_cap"]
-        to_inject.at[i, "squad_goals_away"] = fa["intl_goals_per_cap"]
-
-    return (
-        pd.concat([results, to_inject], ignore_index=True)
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
-
-
-# ---------------------------------------------------------------------------
 # Odds snapshot (persists pre-match market odds for later validation)
 # ---------------------------------------------------------------------------
 
@@ -669,7 +616,7 @@ def main(
             completed["home_score"] = completed["home_score"].astype(int)
             completed["away_score"] = completed["away_score"].astype(int)
             n_before_injection = len(results)
-            results = _inject_completed_wc_matches(results, completed, registry)
+            results = inject_completed_wc2026_matches(results, completed, registry)
             typer.echo(
                 f"Injected {len(results) - n_before_injection} completed WC 2026 match(es)"
                 " into training context.",

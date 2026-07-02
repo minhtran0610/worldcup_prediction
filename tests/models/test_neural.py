@@ -426,3 +426,20 @@ def test_neural_fit_respects_nonuniform_sample_weight_without_crashing():
     totals = out["prob_home"] + out["prob_draw"] + out["prob_away"]
     for total in totals:
         assert total == pytest.approx(1.0, abs=1e-6)
+
+
+def test_neural_fit_handles_nan_sample_weight_gracefully():
+    """fit() must handle NaN values in sample_weight column without crashing,
+    replacing them with neutral weight 1.0 and producing valid predictions."""
+    results = make_results(120)
+    # Set a few sample_weight values to NaN
+    results["sample_weight"] = [1.0] * 118 + [float("nan"), float("nan")]
+    model = _small_model()
+    # Should not raise despite NaN values
+    model.fit(results)
+
+    # Model should still produce valid predictions
+    out = model.predict_batch(results.head(5))
+    totals = out["prob_home"] + out["prob_draw"] + out["prob_away"]
+    for i, total in enumerate(totals):
+        assert total == pytest.approx(1.0, abs=1e-6), f"Row {i}: market sum = {total}"

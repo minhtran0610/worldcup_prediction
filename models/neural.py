@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -352,6 +353,14 @@ class NeuralModel:
             train_weights = torch.from_numpy(
                 train_df["sample_weight"].to_numpy(dtype=np.float32).copy()
             ).to(self._device)
+            # Guard against NaN propagation: replace any NaN with neutral weight 1.0
+            n_nan = torch.isnan(train_weights).sum().item()
+            if n_nan > 0:
+                print(
+                    f"[neural] WARNING: {n_nan} NaN sample_weight value(s) replaced with 1.0",
+                    file=sys.stderr,
+                )
+                train_weights = torch.nan_to_num(train_weights, nan=1.0)
         else:
             train_weights = torch.ones(n_train, dtype=torch.float32, device=self._device)
 

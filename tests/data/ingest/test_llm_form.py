@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 import data.ingest.llm_form as llm_form
@@ -46,6 +48,53 @@ def test_clean_html_strips_tags_and_entities():
     assert llm_form.clean_html("<p>Spain &amp; Croatia</p>") == "Spain & Croatia"
 
 
+def test_strip_markdown_fence_removes_json_fence():
+    fenced = '```json\n{"form_score": 0.5, "confidence": 0.8}\n```'
+    assert llm_form._strip_markdown_fence(fenced) == '{"form_score": 0.5, "confidence": 0.8}'
+
+
+def test_strip_markdown_fence_removes_plain_fence():
+    fenced = '```\n{"form_score": 0.5}\n```'
+    assert llm_form._strip_markdown_fence(fenced) == '{"form_score": 0.5}'
+
+
+def test_strip_markdown_fence_leaves_unfenced_content_unchanged():
+    raw = '{"form_score": 0.5}'
+    assert llm_form._strip_markdown_fence(raw) == raw
+
+
+def test_call_ollama_parses_fenced_json_response(monkeypatch):
+    """qwen3.5:9b has been observed wrapping JSON in a markdown fence despite
+    format: "json" — _call_ollama must still parse it rather than raising."""
+
+    class _FakeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    fenced_content = '```json\n{"form_score": 0.9, "confidence": 0.95}\n```'
+    ollama_response = json.dumps(
+        {"message": {"content": fenced_content}, "done_reason": "stop"}
+    ).encode()
+
+    monkeypatch.setattr(
+        llm_form.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _FakeResponse(ollama_response),
+    )
+
+    raw = llm_form._call_ollama("system", "user", "qwen3.5:9b")
+    assert raw == {"form_score": 0.9, "confidence": 0.95}
+
+
 def test_analyse_team_trajectory_empty_blocks_skips_llm_call(monkeypatch):
     calls = []
     monkeypatch.setattr(llm_form, "_call_ollama", lambda *a, **k: calls.append(1) or {})
@@ -60,9 +109,10 @@ def test_analyse_team_trajectory_empty_blocks_skips_llm_call(monkeypatch):
 def test_analyse_team_trajectory_sends_ordered_blocks_and_trajectory_prompt(monkeypatch):
     captured = {}
 
-    def fake_call_ollama(system_prompt, user_content, model):
+    def fake_call_ollama(system_prompt, user_content, model, num_predict=400):
         captured["system_prompt"] = system_prompt
         captured["user_content"] = user_content
+        captured["num_predict"] = num_predict
         return {
             "form_score": 0.3,
             "performance_context": "Improved across the group stage.",
@@ -92,3 +142,7 @@ def test_analyse_team_trajectory_sends_ordered_blocks_and_trajectory_prompt(monk
     assert result.confidence == 0.6
     assert result.n_articles == 2
     assert result.sources == urls
+    # Larger output budget than the single-match path's default (400) — the
+    # trajectory prompt asks for a longer, multi-match synthesis.
+    assert captured["num_predict"] == llm_form._TRAJECTORY_NUM_PREDICT
+    assert captured["num_predict"] > 400

@@ -467,6 +467,12 @@ _USER_TEMPLATE = (
 # true in any one of them — see data.ingest.trajectory.get_team_trajectory.
 
 _MAX_TRAJECTORY_CHARS = 16000
+# The trajectory prompt asks for a longer response than the single-match one
+# (2-4 sentences of cross-match narrative vs. 1-3, plus lists potentially
+# aggregated across multiple matches) — the default 400-token budget can cut
+# the JSON off mid-generation on richer inputs, which surfaces as a parse
+# failure rather than a truncation warning.
+_TRAJECTORY_NUM_PREDICT = 600
 
 _SYSTEM_PROMPT_TRAJECTORY = (
     "You are a football analyst extracting a team's CURRENT performance trajectory from a "
@@ -530,8 +536,30 @@ _USER_TEMPLATE_TRAJECTORY = (
 )
 
 
-def _call_ollama(system_prompt: str, user_content: str, model: str) -> dict:
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
+
+
+def _strip_markdown_fence(content: str) -> str:
+    """Strip a wrapping ```json ... ``` (or plain ``` ... ```) code fence.
+
+    `format: "json"` isn't always strictly enforced — qwen3.5:9b has been
+    observed wrapping otherwise-valid JSON in a markdown fence despite it,
+    which breaks json.loads at char 0 (a backtick, not `{`). Returns content
+    unchanged if it isn't fenced.
+    """
+    match = _CODE_FENCE_RE.match(content.strip())
+    return match.group(1) if match else content
+
+
+def _call_ollama(system_prompt: str, user_content: str, model: str, num_predict: int = 400) -> dict:
     """POST extraction request to Ollama. Returns parsed JSON dict.
+
+    num_predict caps the output token budget. The default (400) fits the
+    single-match prompt's shorter expected output; callers asking for a
+    longer response (e.g. analyse_team_trajectory's multi-match synthesis)
+    should pass a larger value — otherwise the model's JSON can get cut off
+    mid-generation, which surfaces as a JSON parse failure here, not a
+    truncation warning.
 
     Raises ConnectionError if Ollama is not reachable.
     Raises ValueError if response is not valid JSON.
@@ -542,7 +570,7 @@ def _call_ollama(system_prompt: str, user_content: str, model: str) -> dict:
             "stream": False,
             "think": False,  # critical: disables internal reasoning trace
             "format": "json",
-            "options": {"num_predict": 400, "temperature": 0.1, "top_k": 20},
+            "options": {"num_predict": num_predict, "temperature": 0.1, "top_k": 20},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -566,7 +594,19 @@ def _call_ollama(system_prompt: str, user_content: str, model: str) -> dict:
     if not content:
         raise ValueError(f"Empty content from Ollama (model={model}). Check think=False.")
 
-    return json.loads(content)
+    try:
+        return json.loads(_strip_markdown_fence(content))
+    except json.JSONDecodeError as exc:
+        # done_reason="length" means num_predict cut generation off mid-JSON;
+        # anything else (e.g. "stop") means the model finished normally but
+        # produced non-JSON content (a leaked <think> block, prose preamble,
+        # etc.) — two different root causes needing two different fixes, so
+        # surface the raw content rather than just "invalid JSON" every time.
+        done_reason = result.get("done_reason", "unknown")
+        raise ValueError(
+            f"Ollama returned unparseable JSON (model={model}, done_reason={done_reason!r}, "
+            f"content_len={len(content)}): {content[:800]!r}"
+        ) from exc
 
 
 def _validate_raw(raw: dict, team: str) -> FormAnalysis:
@@ -666,6 +706,7 @@ def analyse_team_trajectory(
             _SYSTEM_PROMPT_TRAJECTORY,
             _USER_TEMPLATE_TRAJECTORY.format(team=team, text=combined),
             model,
+            num_predict=_TRAJECTORY_NUM_PREDICT,
         )
     except ConnectionError as exc:
         print(f"[llm_form] Ollama unavailable: {exc}", file=sys.stderr)

@@ -131,6 +131,13 @@ def get_team_trajectory(
     produces the trajectory-level FormAnalysis — which is then cached under
     the new tier-2 key. If no article was found for any match, the LLM call
     is skipped entirely and a neutral FormAnalysis is cached instead.
+
+    A failed LLM call (Ollama down, unparseable JSON, etc.) is NOT cached —
+    only a clean result (including the legitimate "no articles found" case)
+    is persisted to tier-2, so a transient failure gets retried on the next
+    run instead of permanently freezing that team's trajectory at "no
+    signal." Tier-1 article text is still cached either way, so the retry
+    doesn't re-hit Guardian.
     """
     if team_matches.empty:
         return FormAnalysis.neutral(team)
@@ -198,7 +205,18 @@ def get_team_trajectory(
         )
         analysis = FormAnalysis.neutral(team)
 
-    traj_cache[traj_key] = analysis.to_dict()
-    _save_json_cache(_TRAJECTORY_CACHE_PATH, traj_cache, "trajectory")
+    if analysis.error is None:
+        traj_cache[traj_key] = analysis.to_dict()
+        _save_json_cache(_TRAJECTORY_CACHE_PATH, traj_cache, "trajectory")
+    else:
+        # A transient failure (Ollama down, bad JSON, etc.) — don't memorialise
+        # it as this team's permanent trajectory read. Article text is still
+        # tier-1 cached above, so the retry on the next run is cheap (no
+        # re-fetch from Guardian, just a fresh LLM call).
+        print(
+            f"[trajectory] {team}: not caching — analysis failed ({analysis.error}); "
+            "will retry next run.",
+            file=sys.stderr,
+        )
 
     return analysis

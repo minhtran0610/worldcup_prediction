@@ -171,6 +171,44 @@ def test_get_team_trajectory_no_articles_skips_llm_call(tmp_path, monkeypatch):
     assert result2.confidence == 0.0
 
 
+def test_get_team_trajectory_does_not_cache_a_failed_analysis(tmp_path, monkeypatch):
+    _patch_caches(monkeypatch, tmp_path)
+
+    fetch_calls = []
+    analyse_calls = []
+
+    def fake_fetch(team, opponent, match_date, api_key=None):
+        fetch_calls.append(opponent)
+        return ["report"], ["https://example.com/x"]
+
+    # First call fails (e.g. Ollama returned unparseable JSON); second call
+    # succeeds — simulating a transient failure that should be retried, not
+    # permanently frozen into the cache.
+    def fake_analyse(team, match_blocks, urls=None, model=None):
+        analyse_calls.append(1)
+        if len(analyse_calls) == 1:
+            return FormAnalysis.neutral(team, "Expecting value: line 1 column 1 (char 0)")
+        return FormAnalysis(team=team, form_score=0.5, confidence=0.8)
+
+    monkeypatch.setattr(trajectory, "fetch_team_match_report", fake_fetch)
+    monkeypatch.setattr(trajectory, "analyse_team_trajectory", fake_analyse)
+
+    matches = _matches([("2026-06-15", "Croatia", 1, 0)])
+
+    first = trajectory.get_team_trajectory("Spain", matches)
+    assert first.error is not None
+    assert first.confidence == 0.0
+
+    second = trajectory.get_team_trajectory("Spain", matches)
+    assert second.error is None
+    assert second.form_score == 0.5
+    assert second.confidence == 0.8
+    # The failed first attempt was not cached — the second call recomputed
+    # (re-ran the LLM call), but did not need to re-fetch the article text.
+    assert analyse_calls == [1, 1]
+    assert fetch_calls == ["Croatia"]
+
+
 def test_get_team_trajectory_recovers_from_malformed_tier2_cache_entry(tmp_path, monkeypatch):
     cache_path = tmp_path / "team_trajectory.json"
     monkeypatch.setattr(trajectory, "_TRAJECTORY_CACHE_PATH", cache_path)

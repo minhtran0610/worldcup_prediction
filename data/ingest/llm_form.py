@@ -459,8 +459,78 @@ _USER_TEMPLATE = (
     "Reserve high confidence for genuinely strong, well-sourced evidence>}}"
 )
 
+# ── Trajectory prompt (multi-match, chronologically ordered) ──────────────────
+# Separate from _SYSTEM_PROMPT/_USER_TEMPLATE above, which stay single-article
+# and are still used by the pre-match sentiment path. This prompt explicitly
+# frames the input as an ordered sequence of post-match reports and asks the
+# model to reason about how form has changed ACROSS matches, not just what is
+# true in any one of them — see data.ingest.trajectory.get_team_trajectory.
 
-def _call_ollama(team: str, combined_text: str, model: str) -> dict:
+_MAX_TRAJECTORY_CHARS = 16000
+
+_SYSTEM_PROMPT_TRAJECTORY = (
+    "You are a football analyst extracting a team's CURRENT performance trajectory from a "
+    "sequence of post-match reports, one per completed match, given to you in chronological "
+    "order. Extract ANYTHING the reports say about how the team is playing — results, "
+    "scorelines, style, morale, momentum, manager situation, key players — and reason about "
+    "how it has CHANGED across matches, not just what is true in any single one.\n\n"
+    "Extract especially:\n"
+    "  - Results and how they happened: scorelines, margin of victory/defeat, whether the "
+    "result flattered or understated performance ('thumping', 'comfortable', 'lucky', "
+    "'dominant', 'outplayed', 'deserved more').\n"
+    "  - Trajectory: is the team improving, declining, or inconsistent across these matches? "
+    "Weight more recent matches more heavily than earlier ones when they conflict — a team "
+    "that lost game 1 and dominated games 2-3 is trending up, not down.\n"
+    "  - Team and manager signals: tactical setup, dressing-room atmosphere, coach "
+    "statements, player form, squad cohesion or unrest, and whether these are getting "
+    "better or worse across the sequence.\n"
+    "  - Confirmed absences: players explicitly described as OUT, injured, suspended, "
+    "or sent off FOR THE NEXT MATCH. Do NOT include players described as 'doubtful', "
+    "'carrying a knock', 'returned to training', 'returning', 'expected back', 'set to "
+    "return', 'available', or 'back in the squad' — these players are NOT absent. "
+    "Past absences that have ended are NOT absences.\n\n"
+    "RULES:\n"
+    "1. Only use information EXPLICITLY stated in the text — no external knowledge.\n"
+    "2. performance_context: ALWAYS fill this. Summarise the team's trajectory across ALL "
+    "matches given, not just the most recent one — name the direction (improving/declining/"
+    "steady) explicitly in prose. If genuinely nothing is said, explain what the reports "
+    "covered instead.\n"
+    "3. form_score [-1, 1]: overall CURRENT momentum, informed by the trajectory across all "
+    "matches but weighted toward the most recent. Positive = playing well / rising / "
+    "confident. Negative = struggling / unsettled / weakened. 0 = nothing to go on.\n"
+    "4. confidence [0, 1]: how much evidence you have ACROSS ALL matches given. 0 = team "
+    "barely mentioned in any report. 0.5 = some signal in a few reports. 0.9+ = multiple "
+    "clear statements about form and momentum across most/all matches.\n"
+    "5. Output valid JSON only — no markdown, no text outside the JSON object."
+)
+
+_USER_TEMPLATE_TRAJECTORY = (
+    "Analyse the following chronological sequence of post-match reports about {team} and "
+    "extract structured trajectory signals.\n\n"
+    "CRITICAL: You are ONLY extracting data for {team}. Ignore opponent-specific detail "
+    "except as context for {team}'s own performance — do not list opponent players in "
+    "key_absences, do not score the opponent's morale.\n\n"
+    "REPORTS (chronological order, earliest match first):\n{text}\n\n"
+    "Return JSON with EXACTLY this schema (no extra keys):\n"
+    '{{"form_score": <float -1.0 to 1.0: {team}\'s CURRENT momentum after all matches above, '
+    "weighted toward the most recent>, "
+    '"performance_context": "<string: REQUIRED — 2-4 sentences describing how {team}\'s form '
+    "has evolved across these matches (improving/declining/steady) and why, OR if no signal, "
+    'a brief explanation of what the reports covered and why no trajectory could be extracted>", '
+    '"key_absences": [<strings: names of {team} players confirmed absent for their NEXT match — '
+    "never list players from opposing teams>], "
+    '"morale_signals": [<strings: direct short phrases from the reports indicating {team} '
+    "morale or atmosphere, across all matches>], "
+    '"tactical_notes": "<string: {team} tactical changes or coach statements across the '
+    'reports, empty if none>", '
+    '"confidence": <float 0.0 to 1.0: how strongly the reports collectively support your '
+    "form_score. 0=team barely mentioned; 0.3-0.5=some signal but thin/mixed across matches; "
+    "0.7-1.0=multiple clear, decisive statements across most matches. Reserve high confidence "
+    "for genuinely strong, well-sourced evidence>}}"
+)
+
+
+def _call_ollama(system_prompt: str, user_content: str, model: str) -> dict:
     """POST extraction request to Ollama. Returns parsed JSON dict.
 
     Raises ConnectionError if Ollama is not reachable.
@@ -474,11 +544,8 @@ def _call_ollama(team: str, combined_text: str, model: str) -> dict:
             "format": "json",
             "options": {"num_predict": 400, "temperature": 0.1, "top_k": 20},
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": _USER_TEMPLATE.format(team=team, text=combined_text),
-                },
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
             ],
         }
     ).encode()
@@ -549,7 +616,7 @@ def analyse_team_form(
     combined = "\n\n---\n\n".join(texts)[:_MAX_COMBINED_CHARS]
 
     try:
-        raw = _call_ollama(team, combined, model)
+        raw = _call_ollama(_SYSTEM_PROMPT, _USER_TEMPLATE.format(team=team, text=combined), model)
     except ConnectionError as exc:
         print(f"[llm_form] Ollama unavailable: {exc}", file=sys.stderr)
         return FormAnalysis.neutral(team, str(exc))
@@ -563,6 +630,56 @@ def analyse_team_form(
     analysis = _validate_raw(raw, team)
     analysis.sources = urls or []
     analysis.n_articles = len(texts)
+    return analysis
+
+
+def analyse_team_trajectory(
+    team: str,
+    match_blocks: list[str],
+    urls: list[str] | None = None,
+    model: str = DEFAULT_MODEL,
+) -> FormAnalysis:
+    """Extract a single trajectory-level FormAnalysis from N pre-labeled,
+    chronologically-ordered post-match report blocks (see
+    data.ingest.trajectory.get_team_trajectory for block construction —
+    each block covers one completed match, labeled with match number,
+    opponent, and result).
+
+    Structurally parallel to analyse_team_form, but uses a prompt
+    (_SYSTEM_PROMPT_TRAJECTORY / _USER_TEMPLATE_TRAJECTORY) that explicitly
+    frames the input as an ordered sequence and asks the model to reason
+    about how form has changed across matches — one LLM call per team,
+    rather than one per match aggregated numerically afterward.
+
+    Returns FormAnalysis.neutral() immediately if match_blocks is empty (no
+    LLM call). Returns neutral FormAnalysis with error set on any
+    Ollama/parse failure. n_articles is set from len(urls) — one URL per
+    source article across all matches, not per match.
+    """
+    if not match_blocks:
+        return FormAnalysis.neutral(team)
+
+    combined = "\n\n---\n\n".join(match_blocks)[:_MAX_TRAJECTORY_CHARS]
+
+    try:
+        raw = _call_ollama(
+            _SYSTEM_PROMPT_TRAJECTORY,
+            _USER_TEMPLATE_TRAJECTORY.format(team=team, text=combined),
+            model,
+        )
+    except ConnectionError as exc:
+        print(f"[llm_form] Ollama unavailable: {exc}", file=sys.stderr)
+        return FormAnalysis.neutral(team, str(exc))
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"[llm_form] JSON parse failed for {team!r}: {exc}", file=sys.stderr)
+        return FormAnalysis.neutral(team, str(exc))
+    except Exception as exc:
+        print(f"[llm_form] Unexpected error for {team!r}: {exc}", file=sys.stderr)
+        return FormAnalysis.neutral(team, str(exc))
+
+    analysis = _validate_raw(raw, team)
+    analysis.sources = urls or []
+    analysis.n_articles = len(urls or [])
     return analysis
 
 

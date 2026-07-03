@@ -17,23 +17,20 @@ class _FakeAnalysis:
     confidence: float
 
 
-def test_compute_trajectory_factor_no_usable_entries_returns_one():
-    analyses = [_FakeAnalysis(form_score=0.9, confidence=0.1)]  # below default min_confidence
-    assert compute_trajectory_factor(analyses) == pytest.approx(1.0)
+def test_compute_trajectory_factor_below_min_confidence_returns_one():
+    analysis = _FakeAnalysis(form_score=0.9, confidence=0.1)  # below default min_confidence
+    assert compute_trajectory_factor(analysis) == pytest.approx(1.0)
 
 
-def test_compute_trajectory_factor_confidence_weighted_average():
-    analyses = [
-        _FakeAnalysis(form_score=1.0, confidence=0.5),
-        _FakeAnalysis(form_score=0.0, confidence=0.5),
-    ]
-    expected = 1.0 + K_TRAJECTORY * 0.5  # weighted avg form_score = 0.5
-    assert compute_trajectory_factor(analyses) == pytest.approx(expected, rel=1e-6)
+def test_compute_trajectory_factor_scales_by_form_score():
+    analysis = _FakeAnalysis(form_score=0.5, confidence=0.8)
+    expected = 1.0 + K_TRAJECTORY * 0.5
+    assert compute_trajectory_factor(analysis) == pytest.approx(expected, rel=1e-6)
 
 
 def test_compute_trajectory_factor_clamped_to_range():
-    analyses = [_FakeAnalysis(form_score=1.0, confidence=1.0)] * 5
-    factor = compute_trajectory_factor(analyses)
+    analysis = _FakeAnalysis(form_score=1.0, confidence=1.0)
+    factor = compute_trajectory_factor(analysis)
     assert 0.85 <= factor <= 1.15
 
 

@@ -36,6 +36,19 @@ Application order
 
 from __future__ import annotations
 
+from typing import Protocol
+
+
+class _FormLike(Protocol):
+    """Structural type for compute_trajectory_factor — anything with a
+    form_score and confidence (e.g. FormAnalysis, or a lightweight test
+    double) satisfies this without needing to construct the real dataclass.
+    """
+
+    form_score: float
+    confidence: float
+
+
 K_SENTIMENT: float = 0.30
 MIN_CONFIDENCE: float = 0.25
 
@@ -146,17 +159,19 @@ def build_sentiment_report_line(
 
 
 def compute_trajectory_factor(
-    analyses: list,
+    analysis: _FormLike,
     k: float = K_TRAJECTORY,
     min_confidence: float = TRAJECTORY_MIN_CONFIDENCE,
 ) -> float:
-    """Return a λ multiplier summarising a team's WC2026 match-by-match
-    trajectory (see data.ingest.trajectory.get_team_trajectory).
+    """Return a λ multiplier from a team's WC2026 multi-match trajectory
+    analysis (see data.ingest.trajectory.get_team_trajectory).
 
-    Confidence-weighted average of form_score across entries with
-    confidence >= min_confidence; entries below threshold are dropped
-    entirely (not zero-weighted) to avoid diluting real signal with noise.
-    Returns 1.0 (no adjustment) if no entries clear the confidence bar.
+    `analysis` is a single FormAnalysis already synthesised across all of a
+    team's completed matches by one LLM call — the cross-match reasoning
+    (has form improved, declined, stayed level?) happens inside that call,
+    not here. This function only applies the same confidence-gate-then-clamp
+    pattern as compute_sentiment_factor: below min_confidence returns 1.0
+    (no adjustment); otherwise scales form_score by k and clamps.
 
     Clamped to a tighter range than compute_sentiment_factor's [0.70, 1.30]
     — this is a secondary signal correlated with the same journalism-derived
@@ -164,14 +179,10 @@ def compute_trajectory_factor(
     contribution is kept modest to avoid double-counting the same
     underlying "team is hot/cold" signal twice at full strength.
     """
-    usable = [a for a in analyses if a.confidence >= min_confidence]
-    if not usable:
+    if analysis.confidence < min_confidence:
         return 1.0
 
-    total_weight = sum(a.confidence for a in usable)
-    weighted_score = sum(a.form_score * a.confidence for a in usable) / total_weight
-
-    factor = 1.0 + k * weighted_score
+    factor = 1.0 + k * analysis.form_score
     return max(_TRAJECTORY_FACTOR_MIN, min(_TRAJECTORY_FACTOR_MAX, factor))
 
 

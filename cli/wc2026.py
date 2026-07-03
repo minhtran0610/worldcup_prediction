@@ -866,9 +866,21 @@ def main(
             ]
             if team_matches.empty:
                 trajectory_factors[team] = 1.0
+                note = f"  {team:<22}  trajectory: no completed WC2026 match(es) yet  λ unchanged"
+                typer.echo(note, err=True)
+                form_notes.append(note)
                 continue
-            analyses = get_team_trajectory(team, team_matches)
-            trajectory_factors[team] = compute_trajectory_factor(analyses)
+            analysis = get_team_trajectory(team, team_matches)
+            factor = compute_trajectory_factor(analysis)
+            trajectory_factors[team] = factor
+            note = (
+                f"  {team:<22}  trajectory across {len(team_matches)} match(es)"
+                f"  conf {analysis.confidence:.2f}  λ×{factor:.3f}"
+            )
+            typer.echo(note, err=True)
+            form_notes.append(note)
+            if analysis.performance_context:
+                form_notes.append(f"    {analysis.performance_context}")
 
         n_trajectory = 0
         for i, uprow in enumerate(upcoming.itertuples(index=False)):

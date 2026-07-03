@@ -158,6 +158,8 @@ def _format_telegram_match(
     is_value: bool,
     fa_home,
     fa_away,
+    ta_home,
+    ta_away,
     min_edge: float,
 ) -> str:
     parts: list[str] = []
@@ -179,6 +181,23 @@ def _format_telegram_match(
                 f"({fa.n_articles} article(s) — no narrative extracted)"
                 if fa.n_articles > 0
                 else "(no recent articles found)"
+            )
+            parts.append(f"    {ctx}")
+
+    # Trajectory (multi-match WC2026 form arc, requires GUARDIAN_API_KEY)
+    if ta_home is not None or ta_away is not None:
+        parts.append("")
+        parts.append("<b>🧭 Trajectory</b>")
+        for team, ta in ((home, ta_home), (away, ta_away)):
+            if ta is None:
+                parts.append(f"⬜ <b>{team}</b>  no data")
+                continue
+            emoji = "🟢" if ta.form_score > 0.15 else ("🔴" if ta.form_score < -0.15 else "🟡")
+            parts.append(f"{emoji} <b>{team}</b>  {ta.form_score:+.2f} ({ta.confidence:.0%} conf)")
+            ctx = ta.performance_context or (
+                "(no trajectory narrative extracted)"
+                if ta.confidence > 0
+                else "(no completed matches / no signal yet)"
             )
             parts.append(f"    {ctx}")
 
@@ -854,6 +873,8 @@ def main(
                 typer.echo("No sentiment signal above confidence threshold.", err=True)
 
     # 7d. WC2026 match-by-match trajectory adjustment (requires GUARDIAN_API_KEY)
+    trajectory_analyses: dict = {}
+
     if trajectory and get_guardian_api_key():
         typer.echo("Computing WC2026 trajectory adjustment...", err=True)
         teams_in_play = list(
@@ -873,6 +894,7 @@ def main(
             analysis = get_team_trajectory(team, team_matches)
             factor = compute_trajectory_factor(analysis)
             trajectory_factors[team] = factor
+            trajectory_analyses[team] = analysis
             note = (
                 f"  {team:<22}  trajectory across {len(team_matches)} match(es)"
                 f"  conf {analysis.confidence:.2f}  λ×{factor:.3f}"
@@ -1112,6 +1134,8 @@ def main(
                 is_value=_is_value,
                 fa_home=form_analyses.get(home),
                 fa_away=form_analyses.get(away),
+                ta_home=trajectory_analyses.get(home),
+                ta_away=trajectory_analyses.get(away),
                 min_edge=min_edge,
             )
             telegram_blocks.append(block)

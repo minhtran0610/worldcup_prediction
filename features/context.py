@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 FRIENDLY_SAMPLE_WEIGHT: float = 0.2
 FRIENDLY_TOURNAMENT: str = "Friendly"
 RECENCY_HALF_LIFE_DAYS: float = 365.0 * 3
-WC2026_BOOST: float = 8.0
+WC2026_BOOST: float = 1.0
 
 KNOCKOUT_TOURNAMENTS: frozenset[str] = frozenset(
     {
@@ -38,9 +38,15 @@ def compute_sample_weight(results: pd.DataFrame) -> pd.Series:
       (years, not days) since this trains once over ~150 years of history,
       unlike Dixon-Coles' much steeper per-refit xi decay.
     wc2026_boost: WC2026_BOOST multiplier on WC 2026 matches, on top of
-      recency — current tournament form is the strongest signal for
-      predicting the knockouts, and deserves more than the recency curve
-      alone would give it.
+      recency. Left at 1.0 (no-op) as of 2026-07-09: a chronological sweep
+      (train on history + completed group stage, boost values 1/4/8/12/16/24,
+      eval RPS/NLL/accuracy on the 26 held-out completed knockout matches)
+      showed accuracy degrading monotonically from 65% at boost=1.0 to 54%
+      at boost=24 — plain recency already weights same-week matches near 1.0,
+      so the extra multiplier only let a small group-stage sample dominate
+      gradients and overfit to group-stage-specific patterns that don't
+      transfer to knockout football. Re-validate with the same sweep
+      methodology if this is revisited.
     """
     base = results["tournament"].apply(
         lambda t: FRIENDLY_SAMPLE_WEIGHT if t == FRIENDLY_TOURNAMENT else 1.0

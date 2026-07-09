@@ -410,14 +410,25 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
     if model_name == "neural":
         from models.neural import NeuralModel
 
-        if checkpoint is not None and Path(checkpoint).exists():
-            try:
-                m = NeuralModel.load(str(checkpoint))
-                m._train_results = results
-                return m
-            except Exception as exc:
+        if checkpoint is not None:
+            if Path(checkpoint).exists():
+                try:
+                    m = NeuralModel.load(str(checkpoint))
+                    m._train_results = results
+                    return m
+                except Exception as exc:
+                    typer.echo(
+                        f"Warning: could not load checkpoint {checkpoint}: {exc} "
+                        "— fitting from scratch.",
+                        err=True,
+                    )
+            else:
                 typer.echo(
-                    f"Warning: could not load checkpoint {checkpoint}: {exc} — fitting from scratch.",
+                    f"Warning: checkpoint {checkpoint} not found (resolved to "
+                    f"{Path(checkpoint).resolve()}) — fitting from scratch. "
+                    "This retrains on the full historical dataset and can take a long time; "
+                    "if this is unexpected, check you're running from the project root or "
+                    "pass an absolute --checkpoint path.",
                     err=True,
                 )
         m = NeuralModel()
@@ -440,21 +451,30 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
         constituents: list = [dc, xgb]
         weights: list[float] = [0.5, 0.5]
 
-        if checkpoint is not None and Path(checkpoint).exists():
-            from models.neural import NeuralModel
+        if checkpoint is not None:
+            if Path(checkpoint).exists():
+                from models.neural import NeuralModel
 
-            typer.echo(f"Loading neural checkpoint from {checkpoint}...", err=True)
-            try:
-                neural = NeuralModel.load(str(checkpoint))
-                neural._train_results = results
-                constituents.append(neural)
-                # Equal weight across all three
-                n = len(constituents)
-                weights = [1.0 / n] * n
-                typer.echo("Neural model included in ensemble.", err=True)
-            except Exception as exc:
+                typer.echo(f"Loading neural checkpoint from {checkpoint}...", err=True)
+                try:
+                    neural = NeuralModel.load(str(checkpoint))
+                    neural._train_results = results
+                    constituents.append(neural)
+                    # Equal weight across all three
+                    n = len(constituents)
+                    weights = [1.0 / n] * n
+                    typer.echo("Neural model included in ensemble.", err=True)
+                except Exception as exc:
+                    typer.echo(
+                        f"Warning: could not load neural checkpoint: {exc} "
+                        "— using DC+XGB ensemble.",
+                        err=True,
+                    )
+            else:
                 typer.echo(
-                    f"Warning: could not load neural checkpoint: {exc} — using DC+XGB ensemble.",
+                    f"Warning: checkpoint {checkpoint} not found (resolved to "
+                    f"{Path(checkpoint).resolve()}) — using DC+XGB ensemble without the "
+                    "neural component.",
                     err=True,
                 )
 

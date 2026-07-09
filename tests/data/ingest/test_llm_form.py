@@ -109,10 +109,11 @@ def test_analyse_team_trajectory_empty_blocks_skips_llm_call(monkeypatch):
 def test_analyse_team_trajectory_sends_ordered_blocks_and_trajectory_prompt(monkeypatch):
     captured = {}
 
-    def fake_call_ollama(system_prompt, user_content, model, num_predict=400):
+    def fake_call_ollama(system_prompt, user_content, model, num_predict=400, num_ctx=8192):
         captured["system_prompt"] = system_prompt
         captured["user_content"] = user_content
         captured["num_predict"] = num_predict
+        captured["num_ctx"] = num_ctx
         return {
             "form_score": 0.3,
             "performance_context": "Improved across the group stage.",
@@ -146,3 +147,45 @@ def test_analyse_team_trajectory_sends_ordered_blocks_and_trajectory_prompt(monk
     # trajectory prompt asks for a longer, multi-match synthesis.
     assert captured["num_predict"] == llm_form._TRAJECTORY_NUM_PREDICT
     assert captured["num_predict"] > 400
+    # Large enough context window to fit every match's full article text —
+    # see _TRAJECTORY_NUM_CTX for the empirical GPU-memory reasoning.
+    assert captured["num_ctx"] == llm_form._TRAJECTORY_NUM_CTX
+
+
+def test_analyse_team_trajectory_does_not_truncate_later_matches(monkeypatch):
+    """Regression test for the real bug found in production: a naive
+    join-then-slice on the combined text silently dropped every match after
+    the first two once their articles alone exceeded the old character cap
+    — a 5-match trajectory (Morocco) never saw its final 3-0 win over Canada
+    because that match's content was truncated away before reaching the LLM.
+    """
+    captured = {}
+
+    def fake_call_ollama(system_prompt, user_content, model, num_predict=400, num_ctx=8192):
+        captured["user_content"] = user_content
+        return {
+            "form_score": 0.5,
+            "performance_context": "ok",
+            "key_absences": [],
+            "morale_signals": [],
+            "tactical_notes": "",
+            "confidence": 0.7,
+        }
+
+    monkeypatch.setattr(llm_form, "_call_ollama", fake_call_ollama)
+
+    # Two large early matches whose combined size alone would have exceeded
+    # the old 16000-char cap, plus a distinctly-labeled later match.
+    huge_article = "Dense match report text. " * 1000  # ~26,000 chars
+    blocks = [
+        f"=== Match 1 of 3 — vs Brazil (2026-06-13), Morocco won 2-1 ===\n{huge_article}",
+        f"=== Match 2 of 3 — vs Scotland (2026-06-19), Morocco drew 0-0 ===\n{huge_article}",
+        "=== Match 3 of 3 — vs Canada (2026-07-04), Morocco won 3-0 ===\nDominant win over Canada.",
+    ]
+
+    llm_form.analyse_team_trajectory("Morocco", blocks)
+
+    assert "Match 1 of 3" in captured["user_content"]
+    assert "Match 2 of 3" in captured["user_content"]
+    assert "Match 3 of 3" in captured["user_content"]
+    assert "Dominant win over Canada" in captured["user_content"]

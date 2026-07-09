@@ -466,13 +466,41 @@ _USER_TEMPLATE = (
 # model to reason about how form has changed ACROSS matches, not just what is
 # true in any one of them — see data.ingest.trajectory.get_team_trajectory.
 
-_MAX_TRAJECTORY_CHARS = 16000
 # The trajectory prompt asks for a longer response than the single-match one
 # (2-4 sentences of cross-match narrative vs. 1-3, plus lists potentially
 # aggregated across multiple matches) — the default 400-token budget can cut
 # the JSON off mid-generation on richer inputs, which surfaces as a parse
 # failure rather than a truncation warning.
 _TRAJECTORY_NUM_PREDICT = 600
+
+# Ollama defaults to a 4096-token context window regardless of what a model
+# architecturally supports, UNLESS num_ctx is set explicitly in the request —
+# verified empirically (a 52k-char prompt with a marker near the end came
+# back with prompt_eval_count=4096 and the model never saw the marker). Our
+# previous _MAX_TRAJECTORY_CHARS=16000 app-level cap was masking this same
+# ceiling, and a naive join-then-slice was silently dropping whichever
+# matches didn't fit — e.g. a 5-match trajectory where the first two
+# matches' articles alone exceeded the cap, so the model never saw the last
+# three matches (including a 3-0 win) at all.
+#
+# Empirically tested on this project's RTX 4070 Ti Super (16GB VRAM) via
+# `ollama ps` + `nvidia-smi` while loading qwen3.5:9b (Q4_K_M):
+#   num_ctx=65536   -> 100% GPU, ~11GB used, ~5.4GB free
+#   num_ctx=131072  -> 100% GPU, ~14GB used, ~2.6GB free  (largest still 100% GPU)
+#   num_ctx=262144  -> model's advertised max, but spills to 31%/69% CPU/GPU
+#                      (much slower — not worth it)
+# 131072 chosen over 65536: a deep-tournament team (finalist, 7 matches) with
+# heavy Guardian coverage could plausibly need ~70k+ tokens, uncomfortably
+# close to 65536's ceiling — 131072 gives real margin for that actual worst
+# case while still running 100% on GPU. The per-match/combined character
+# truncation this replaced is removed entirely — num_ctx is now the real,
+# properly-sized boundary instead of an arbitrary undersized guess.
+_TRAJECTORY_NUM_CTX = 131072
+
+# The single-match sentiment path's input is much smaller (one match's
+# articles, already capped at _MAX_COMBINED_CHARS=8000 chars each), but set
+# explicitly rather than relying on Ollama's undocumented-in-code default.
+_SENTIMENT_NUM_CTX = 8192
 
 _SYSTEM_PROMPT_TRAJECTORY = (
     "You are a football analyst extracting a team's CURRENT performance trajectory from a "
@@ -551,7 +579,13 @@ def _strip_markdown_fence(content: str) -> str:
     return match.group(1) if match else content
 
 
-def _call_ollama(system_prompt: str, user_content: str, model: str, num_predict: int = 400) -> dict:
+def _call_ollama(
+    system_prompt: str,
+    user_content: str,
+    model: str,
+    num_predict: int = 400,
+    num_ctx: int = _SENTIMENT_NUM_CTX,
+) -> dict:
     """POST extraction request to Ollama. Returns parsed JSON dict.
 
     num_predict caps the output token budget. The default (400) fits the
@@ -560,6 +594,12 @@ def _call_ollama(system_prompt: str, user_content: str, model: str, num_predict:
     should pass a larger value — otherwise the model's JSON can get cut off
     mid-generation, which surfaces as a JSON parse failure here, not a
     truncation warning.
+
+    num_ctx caps the total context window (prompt + response). Ollama
+    silently truncates to a small default (observed: 4096 tokens) if this
+    isn't set explicitly, regardless of what the model itself supports —
+    always pass a value sized for the actual input, not just accept the
+    default.
 
     Raises ConnectionError if Ollama is not reachable.
     Raises ValueError if response is not valid JSON.
@@ -570,7 +610,12 @@ def _call_ollama(system_prompt: str, user_content: str, model: str, num_predict:
             "stream": False,
             "think": False,  # critical: disables internal reasoning trace
             "format": "json",
-            "options": {"num_predict": num_predict, "temperature": 0.1, "top_k": 20},
+            "options": {
+                "num_predict": num_predict,
+                "num_ctx": num_ctx,
+                "temperature": 0.1,
+                "top_k": 20,
+            },
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -699,7 +744,11 @@ def analyse_team_trajectory(
     if not match_blocks:
         return FormAnalysis.neutral(team)
 
-    combined = "\n\n---\n\n".join(match_blocks)[:_MAX_TRAJECTORY_CHARS]
+    # No character truncation here — num_ctx=_TRAJECTORY_NUM_CTX (see comment
+    # above the constant) is sized to comfortably fit every match's full
+    # article text, so there's no need to cut anything and risk silently
+    # dropping a match the way the old char-cap-on-the-joined-whole did.
+    combined = "\n\n---\n\n".join(match_blocks)
 
     try:
         raw = _call_ollama(
@@ -707,6 +756,7 @@ def analyse_team_trajectory(
             _USER_TEMPLATE_TRAJECTORY.format(team=team, text=combined),
             model,
             num_predict=_TRAJECTORY_NUM_PREDICT,
+            num_ctx=_TRAJECTORY_NUM_CTX,
         )
     except ConnectionError as exc:
         print(f"[llm_form] Ollama unavailable: {exc}", file=sys.stderr)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from io import StringIO
 from typing import TYPE_CHECKING
 
@@ -393,9 +394,9 @@ def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
             try:
                 save_cache(cache_name, df)
             except Exception as exc:
-                print(f"[wc2026] WARNING: could not save cache — {exc}")
+                print(f"[wc2026] WARNING: could not save cache — {exc}", file=sys.stderr)
             return df
-        print("[wc2026] API-Football returned empty — trying openfootball.")
+        print("[wc2026] API-Football returned empty — trying openfootball.", file=sys.stderr)
 
     # --- Secondary: openfootball/worldcup.json (free, no auth, ~daily updates) ---
     from data.ingest.openfootball import fetch_wc2026_fixtures as _of_fetch
@@ -405,22 +406,28 @@ def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
         try:
             save_cache(cache_name, df)
         except Exception as exc:
-            print(f"[wc2026] WARNING: could not save cache — {exc}")
+            print(f"[wc2026] WARNING: could not save cache — {exc}", file=sys.stderr)
         return df
-    print("[wc2026] openfootball returned empty — falling back to Wikipedia scrape.")
+    print(
+        "[wc2026] openfootball returned empty — falling back to Wikipedia scrape.",
+        file=sys.stderr,
+    )
 
     # --- Fallback: Wikipedia scrape ---
     try:
         df = _scrape_wikipedia()
     except Exception as exc:
-        print(f"[wc2026] WARNING: Wikipedia scraping failed — {exc}")
-        print("[wc2026] Returning empty DataFrame; pipeline can continue without schedule.")
+        print(f"[wc2026] WARNING: Wikipedia scraping failed — {exc}", file=sys.stderr)
+        print(
+            "[wc2026] Returning empty DataFrame; pipeline can continue without schedule.",
+            file=sys.stderr,
+        )
         return _empty_df()
 
     try:
         save_cache(cache_name, df)
     except Exception as exc:
-        print(f"[wc2026] WARNING: could not save cache — {exc}")
+        print(f"[wc2026] WARNING: could not save cache — {exc}", file=sys.stderr)
 
     return df
 

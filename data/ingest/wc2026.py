@@ -5,6 +5,7 @@ import sys
 from io import StringIO
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from data.ingest.cache import load_cache, save_cache
@@ -435,17 +436,33 @@ def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
 WC2026_KNOCKOUT_START: pd.Timestamp = pd.Timestamp("2026-06-28")  # ty: ignore[invalid-assignment]
 
 
-def _is_knockout_stage(dates: pd.Series) -> pd.Series:
-    """True for matches on/after the WC2026 knockout start date.
+def _is_knockout_stage(dates: pd.Series, stages: pd.Series | None = None) -> pd.Series:
+    """True for matches in a WC2026 knockout round.
 
-    Date-based rather than parsing the `stage` string: schedule sources
-    disagree on stage-string format (openfootball gives "Round of 32" etc.,
-    the Wikipedia scrape fallback always writes "Group"), but the WC2026
-    knockout start date is fixed and known — Round of 32 began 2026-06-28
-    with South Africa vs Canada, the day after the group stage's final
-    matchday (2026-06-27).
+    Prefers the `stage` label when it's a specific, non-generic string (e.g.
+    "Round of 32", "Group J - Matchday 17") — reliable from API-Football and
+    openfootball. A pure date cutoff misclassifies matches that kick off on
+    the same calendar day the knockout stage starts: Group J's final
+    matchday and Round of 32's opener (South Africa vs Canada) are both
+    2026-06-28, so `dates >= WC2026_KNOCKOUT_START` alone flags those
+    earlier-in-the-day group deciders as knockout.
+
+    Falls back to the date cutoff only when `stages` is omitted, or for rows
+    whose label is missing/the bare generic "Group" — the Wikipedia scrape
+    fallback's catch-all, which carries no matchday detail to disambiguate.
     """
-    return dates >= WC2026_KNOCKOUT_START
+    by_date = dates >= WC2026_KNOCKOUT_START
+    if stages is None:
+        return by_date
+
+    normalised = stages.fillna("").str.strip().str.lower()
+    explicit_group = normalised.str.startswith("group") & (normalised != "group")
+    ambiguous = ~explicit_group & ((normalised == "group") | (normalised == ""))
+
+    return pd.Series(
+        np.where(explicit_group, False, np.where(ambiguous, by_date, True)),
+        index=dates.index,
+    )
 
 
 def inject_completed_wc2026_matches(
@@ -477,7 +494,9 @@ def inject_completed_wc2026_matches(
     to_inject["tournament"] = "FIFA World Cup"
     to_inject = extend_elo_through_matches(results, to_inject)
     to_inject["country"] = "United States"
-    to_inject["is_knockout"] = _is_knockout_stage(to_inject["date"])
+    to_inject["is_knockout"] = _is_knockout_stage(
+        to_inject["date"], to_inject["stage"] if "stage" in to_inject.columns else None
+    )
     to_inject["is_host_home"] = to_inject["home_team"].isin(WC_2026_HOSTS)
     to_inject["is_host_away"] = to_inject["away_team"].isin(WC_2026_HOSTS)
     to_inject["rest_days_home"] = 7.0

@@ -13,7 +13,7 @@ STEP_MONTHS: int = 6
 KELLY_FRACTION: float = 0.25
 MIN_EDGE: float = 0.02
 MIN_MARKET_PROB: float = 0.08
-MIN_RELATIVE_EDGE: float = 0.30
+MIN_RELATIVE_EDGE: float = 0.20
 
 
 @dataclass

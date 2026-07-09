@@ -80,11 +80,10 @@ def main(
         raise typer.Exit(1)
 
     # 2. Chronological train/val split — WC2026 rows always stay in train.
-    # They're deliberately boosted via sample_weight (see compute_sample_weight)
-    # so early-stopping on a genuinely held-out historical window still means
-    # something; holding them out here would defeat the point of the boost,
-    # and there are only ~80 of them, too few to be a meaningful val window
-    # on their own anyway.
+    # Held out here, they'd never inform early stopping at all (see
+    # compute_sample_weight — WC2026_BOOST is currently 1.0, a no-op, but the
+    # rows still deserve to be learned from); there are only ~96 of them,
+    # too few to be a meaningful val window on their own anyway.
     cutoff: pd.Timestamp = results["date"].max() - pd.DateOffset(months=val_months)
     is_wc26 = is_wc2026_match(results)
     train_df = results[(results["date"] < cutoff) | is_wc26].reset_index(drop=True)

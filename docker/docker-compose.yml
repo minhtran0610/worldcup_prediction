@@ -12,6 +12,7 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       THE_ODDS_API_KEY: ${THE_ODDS_API_KEY}
+      GUARDIAN_API_KEY: ${GUARDIAN_API_KEY}
       # Point at the host's Ollama instance; host.docker.internal resolves via extra_hosts below
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       ADVANCE_MINUTES: ${ADVANCE_MINUTES:-60}

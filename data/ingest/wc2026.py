@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import re
+import sys
 from io import StringIO
+from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from data.ingest.cache import load_cache, save_cache
+from features.context import WC_2026_HOSTS
+from features.elo import extend_elo_through_matches
+
+if TYPE_CHECKING:
+    from features.squad_registry import SquadRegistry
 
 WC2026_WIKI_URL: str = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup"
 
@@ -387,9 +395,9 @@ def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
             try:
                 save_cache(cache_name, df)
             except Exception as exc:
-                print(f"[wc2026] WARNING: could not save cache — {exc}")
+                print(f"[wc2026] WARNING: could not save cache — {exc}", file=sys.stderr)
             return df
-        print("[wc2026] API-Football returned empty — trying openfootball.")
+        print("[wc2026] API-Football returned empty — trying openfootball.", file=sys.stderr)
 
     # --- Secondary: openfootball/worldcup.json (free, no auth, ~daily updates) ---
     from data.ingest.openfootball import fetch_wc2026_fixtures as _of_fetch
@@ -399,21 +407,122 @@ def load_wc2026_schedule(force_refresh: bool = False) -> pd.DataFrame:
         try:
             save_cache(cache_name, df)
         except Exception as exc:
-            print(f"[wc2026] WARNING: could not save cache — {exc}")
+            print(f"[wc2026] WARNING: could not save cache — {exc}", file=sys.stderr)
         return df
-    print("[wc2026] openfootball returned empty — falling back to Wikipedia scrape.")
+    print(
+        "[wc2026] openfootball returned empty — falling back to Wikipedia scrape.",
+        file=sys.stderr,
+    )
 
     # --- Fallback: Wikipedia scrape ---
     try:
         df = _scrape_wikipedia()
     except Exception as exc:
-        print(f"[wc2026] WARNING: Wikipedia scraping failed — {exc}")
-        print("[wc2026] Returning empty DataFrame; pipeline can continue without schedule.")
+        print(f"[wc2026] WARNING: Wikipedia scraping failed — {exc}", file=sys.stderr)
+        print(
+            "[wc2026] Returning empty DataFrame; pipeline can continue without schedule.",
+            file=sys.stderr,
+        )
         return _empty_df()
 
     try:
         save_cache(cache_name, df)
     except Exception as exc:
-        print(f"[wc2026] WARNING: could not save cache — {exc}")
+        print(f"[wc2026] WARNING: could not save cache — {exc}", file=sys.stderr)
 
     return df
+
+
+WC2026_KNOCKOUT_START: pd.Timestamp = pd.Timestamp("2026-06-28")  # ty: ignore[invalid-assignment]
+
+
+def _is_knockout_stage(dates: pd.Series, stages: pd.Series | None = None) -> pd.Series:
+    """True for matches in a WC2026 knockout round.
+
+    Prefers the `stage` label when it's a specific, non-generic string (e.g.
+    "Round of 32", "Group J - Matchday 17") — reliable from API-Football and
+    openfootball. A pure date cutoff misclassifies matches that kick off on
+    the same calendar day the knockout stage starts: Group J's final
+    matchday and Round of 32's opener (South Africa vs Canada) are both
+    2026-06-28, so `dates >= WC2026_KNOCKOUT_START` alone flags those
+    earlier-in-the-day group deciders as knockout.
+
+    Falls back to the date cutoff only when `stages` is omitted, or for rows
+    whose label is missing/the bare generic "Group" — the Wikipedia scrape
+    fallback's catch-all, which carries no matchday detail to disambiguate.
+    """
+    by_date = dates >= WC2026_KNOCKOUT_START
+    if stages is None:
+        return by_date
+
+    normalised = stages.fillna("").str.strip().str.lower()
+    explicit_group = normalised.str.startswith("group") & (normalised != "group")
+    ambiguous = ~explicit_group & ((normalised == "group") | (normalised == ""))
+
+    return pd.Series(
+        np.where(explicit_group, False, np.where(ambiguous, by_date, True)),
+        index=dates.index,
+    )
+
+
+def inject_completed_wc2026_matches(
+    results: pd.DataFrame,
+    completed: pd.DataFrame,
+    registry: SquadRegistry,
+) -> pd.DataFrame:
+    """Fold completed WC2026 matches into a results/context DataFrame.
+
+    Adds Elo (carried forward from `results`'s end-state), squad-quality
+    features, and context columns (is_knockout, is_host_*, rest_days, a
+    sample_weight placeholder) so the merged frame matches the schema
+    NeuralModel / XGBModel / derive_context-produced frames expect.
+
+    `completed` must have: date, home_team, away_team, home_score, away_score.
+
+    sample_weight is set to a 1.0 placeholder here — callers that need the
+    recency/WC2026-boosted weight (see features.context.compute_sample_weight)
+    should recompute it over the full merged frame after calling this
+    function, so the boost is based on the true post-injection latest date.
+    """
+    to_inject = completed.copy()
+    if to_inject.empty:
+        return results
+
+    to_inject["date"] = to_inject["date"].fillna(pd.Timestamp("2026-06-11"))
+    to_inject = to_inject.sort_values("date").reset_index(drop=True)
+    to_inject["neutral"] = True
+    to_inject["tournament"] = "FIFA World Cup"
+    to_inject = extend_elo_through_matches(results, to_inject)
+    to_inject["country"] = "United States"
+    to_inject["is_knockout"] = _is_knockout_stage(
+        to_inject["date"], to_inject["stage"] if "stage" in to_inject.columns else None
+    )
+    to_inject["is_host_home"] = to_inject["home_team"].isin(WC_2026_HOSTS)
+    to_inject["is_host_away"] = to_inject["away_team"].isin(WC_2026_HOSTS)
+    to_inject["rest_days_home"] = 7.0
+    to_inject["rest_days_away"] = 7.0
+    to_inject["sample_weight"] = 1.0
+    for col in [
+        "squad_top5_home",
+        "squad_top5_away",
+        "squad_caps_home",
+        "squad_caps_away",
+        "squad_goals_home",
+        "squad_goals_away",
+    ]:
+        to_inject[col] = 0.0
+    for i, wc_row in to_inject.iterrows():
+        fh = registry.get_features(wc_row["home_team"], 2026, "FIFA World Cup")
+        fa = registry.get_features(wc_row["away_team"], 2026, "FIFA World Cup")
+        to_inject.at[i, "squad_top5_home"] = fh["top5_share"]
+        to_inject.at[i, "squad_top5_away"] = fa["top5_share"]
+        to_inject.at[i, "squad_caps_home"] = fh["avg_caps_norm"]
+        to_inject.at[i, "squad_caps_away"] = fa["avg_caps_norm"]
+        to_inject.at[i, "squad_goals_home"] = fh["intl_goals_per_cap"]
+        to_inject.at[i, "squad_goals_away"] = fa["intl_goals_per_cap"]
+
+    return (
+        pd.concat([results, to_inject], ignore_index=True)
+        .sort_values("date")
+        .reset_index(drop=True)
+    )

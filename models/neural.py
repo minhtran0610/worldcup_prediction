@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -155,8 +156,10 @@ def _nll_loss_batch(
     rho: torch.Tensor,
     home_scores: torch.Tensor,
     away_scores: torch.Tensor,
+    weights: torch.Tensor,
 ) -> torch.Tensor:
-    """Mean scoreline NLL over a batch, computed entirely in PyTorch for autograd.
+    """Weighted mean scoreline NLL over a batch, computed entirely in PyTorch
+    for autograd. weights must be shape (batch,), same length as lambda_home.
 
     Reimplements build_grid in torch ops so gradients flow through lambda_home,
     lambda_away, and rho.
@@ -206,7 +209,8 @@ def _nll_loss_batch(
     a_idx = away_scores.clamp(0, 7).long()
 
     p = grid[batch_idx, h_idx, a_idx].clamp(min=_LOG_CLIP)
-    return -torch.log(p).mean()
+    nll = -torch.log(p)
+    return (nll * weights).sum() / weights.sum().clamp(min=_LOG_CLIP)
 
 
 class NeuralModel:
@@ -345,6 +349,20 @@ class NeuralModel:
         train_as = torch.from_numpy(train_df["away_score"].to_numpy(dtype=np.int64).copy()).to(
             self._device
         )
+        if "sample_weight" in train_df.columns:
+            train_weights = torch.from_numpy(
+                train_df["sample_weight"].to_numpy(dtype=np.float32).copy()
+            ).to(self._device)
+            # Guard against NaN propagation: replace any NaN with neutral weight 1.0
+            n_nan = torch.isnan(train_weights).sum().item()
+            if n_nan > 0:
+                print(
+                    f"[neural] WARNING: {n_nan} NaN sample_weight value(s) replaced with 1.0",
+                    file=sys.stderr,
+                )
+                train_weights = torch.nan_to_num(train_weights, nan=1.0)
+        else:
+            train_weights = torch.ones(n_train, dtype=torch.float32, device=self._device)
 
         # Precompute all train tensors once — avoids re-running get_form_sequence each batch
         print("Precomputing train form sequences...", flush=True)
@@ -363,6 +381,7 @@ class NeuralModel:
         val_as = torch.from_numpy(val_df["away_score"].to_numpy(dtype=np.int64).copy()).to(
             self._device
         )
+        val_weights = torch.ones(len(val_df), dtype=torch.float32, device=self._device)
 
         for epoch in range(1, self.n_epochs + 1):
             self._net.train()
@@ -380,10 +399,11 @@ class NeuralModel:
                 ctx = train_ctx[idx]
                 hs = train_hs[idx]
                 as_ = train_as[idx]
+                w = train_weights[idx]
 
                 optimizer.zero_grad()
                 lh, la, rho = self._net(home_idx, away_idx, home_seq, away_seq, ctx)
-                loss = _nll_loss_batch(lh, la, rho, hs, as_)
+                loss = _nll_loss_batch(lh, la, rho, hs, as_, w)
                 loss.backward()
                 optimizer.step()
 
@@ -398,7 +418,7 @@ class NeuralModel:
                 lh_v, la_v, rho_v = self._net(
                     val_home_idx, val_away_idx, val_home_seq, val_away_seq, val_ctx
                 )
-                val_nll = _nll_loss_batch(lh_v, la_v, rho_v, val_hs, val_as).item()
+                val_nll = _nll_loss_batch(lh_v, la_v, rho_v, val_hs, val_as, val_weights).item()
 
             if epoch % 10 == 0:
                 print(

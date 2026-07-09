@@ -36,8 +36,26 @@ Application order
 
 from __future__ import annotations
 
+from typing import Protocol
+
+
+class _FormLike(Protocol):
+    """Structural type for compute_trajectory_factor — anything with a
+    form_score and confidence (e.g. FormAnalysis, or a lightweight test
+    double) satisfies this without needing to construct the real dataclass.
+    """
+
+    form_score: float
+    confidence: float
+
+
 K_SENTIMENT: float = 0.30
 MIN_CONFIDENCE: float = 0.25
+
+K_TRAJECTORY: float = 0.15
+TRAJECTORY_MIN_CONFIDENCE: float = 0.25
+_TRAJECTORY_FACTOR_MIN: float = 0.85
+_TRAJECTORY_FACTOR_MAX: float = 1.15
 
 
 def compute_sentiment_factor(
@@ -138,3 +156,50 @@ def build_sentiment_report_line(
     factor_str = f"λ×{factor:.3f}"
     absences_str = f"  absent: {', '.join(key_absences)}" if key_absences else ""
     return f"  {name}  form {direction}  conf {confidence:.2f}  {factor_str}{absences_str}"
+
+
+def compute_trajectory_factor(
+    analysis: _FormLike,
+    k: float = K_TRAJECTORY,
+    min_confidence: float = TRAJECTORY_MIN_CONFIDENCE,
+) -> float:
+    """Return a λ multiplier from a team's WC2026 multi-match trajectory
+    analysis (see data.ingest.trajectory.get_team_trajectory).
+
+    `analysis` is a single FormAnalysis already synthesised across all of a
+    team's completed matches by one LLM call — the cross-match reasoning
+    (has form improved, declined, stayed level?) happens inside that call,
+    not here. This function only applies the same confidence-gate-then-clamp
+    pattern as compute_sentiment_factor: below min_confidence returns 1.0
+    (no adjustment); otherwise scales form_score by k and clamps.
+
+    Clamped to a tighter range than compute_sentiment_factor's [0.70, 1.30]
+    — this is a secondary signal correlated with the same journalism-derived
+    narrative as the pre-match sentiment read, so its individual
+    contribution is kept modest to avoid double-counting the same
+    underlying "team is hot/cold" signal twice at full strength.
+    """
+    if analysis.confidence < min_confidence:
+        return 1.0
+
+    factor = 1.0 + k * analysis.form_score
+    return max(_TRAJECTORY_FACTOR_MIN, min(_TRAJECTORY_FACTOR_MAX, factor))
+
+
+def apply_trajectory_adjustment(
+    lambda_home: float,
+    lambda_away: float,
+    rho: float,
+    trajectory_factor_home: float,
+    trajectory_factor_away: float,
+) -> tuple[float, float, float]:
+    """Return (lambda_home_adj, lambda_away_adj, rho) after trajectory scaling.
+
+    rho passed through unchanged, matching apply_injury_adjustment and
+    apply_sentiment_adjustment. Apply AFTER apply_sentiment_adjustment —
+    the trajectory signal is coarser and should be layered on top of the
+    fresher pre-match read, not compete with it for primacy.
+    """
+    lh_adj = max(lambda_home * trajectory_factor_home, 0.01)
+    la_adj = max(lambda_away * trajectory_factor_away, 0.01)
+    return lh_adj, la_adj, rho

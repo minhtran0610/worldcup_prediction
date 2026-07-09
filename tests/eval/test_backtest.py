@@ -207,9 +207,9 @@ def test_compute_value_bets_no_odds_returns_empty_or_nan():
 def test_compute_value_bets_outcome_won_home_correct():
     """outcome_won=True when the predicted outcome (home) actually occurred."""
     df = _make_predictions_with_odds(
-        prob_home=0.70,  # large edge on home
-        prob_draw=0.15,
-        prob_away=0.15,
+        prob_home=0.75,  # large edge on home, clears the relative-edge gate too
+        prob_draw=0.13,
+        prob_away=0.12,
         odds_home=1.80,
         odds_draw=4.00,
         odds_away=5.00,
@@ -224,9 +224,9 @@ def test_compute_value_bets_outcome_won_home_correct():
 def test_compute_value_bets_outcome_won_away_correct():
     """outcome_won=False when the predicted outcome (home) did NOT occur."""
     df = _make_predictions_with_odds(
-        prob_home=0.70,
-        prob_draw=0.15,
-        prob_away=0.15,
+        prob_home=0.75,  # large edge on home, clears the relative-edge gate too
+        prob_draw=0.13,
+        prob_away=0.12,
         odds_home=1.80,
         odds_draw=4.00,
         odds_away=5.00,
@@ -305,3 +305,113 @@ def test_compute_value_bets_with_odds_kelly_stake():
     assert row["best_edge_outcome"] == "home"
     assert row["best_edge"] == pytest.approx(expected_edge, abs=1e-6)
     assert row["kelly_stake"] == pytest.approx(expected_kelly, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# select_value_bet — favorite-longshot-aware gating
+# ---------------------------------------------------------------------------
+
+
+def test_select_value_bet_rejects_longshot_below_probability_floor():
+    """Model 9% vs market 6% clears the flat absolute-edge threshold but must
+    be rejected by the probability floor — this is the DR Congo/England case."""
+    from eval.backtest import select_value_bet
+
+    result = select_value_bet(
+        prob_home=0.09,
+        prob_draw=0.20,
+        prob_away=0.71,
+        market_home=0.06,
+        market_draw=0.19,
+        market_away=0.75,
+    )
+    assert result["best_outcome"] == "home"
+    assert result["is_value"] is False
+
+
+def test_select_value_bet_rejects_edge_below_relative_threshold():
+    """A 2pp edge on a mid-probability outcome (42% vs 39%, ~7.7% relative)
+    clears the absolute and floor gates but must fail the relative-edge gate."""
+    from eval.backtest import select_value_bet
+
+    result = select_value_bet(
+        prob_home=0.42,
+        prob_draw=0.30,
+        prob_away=0.28,
+        market_home=0.39,
+        market_draw=0.32,
+        market_away=0.29,
+    )
+    assert result["best_outcome"] == "home"
+    assert result["best_edge"] == pytest.approx(0.03, abs=1e-9)
+    assert result["is_value"] is False
+
+
+def test_select_value_bet_accepts_bet_clearing_all_three_gates():
+    """A well-supported edge on a mid-range favorite must still be flagged."""
+    from eval.backtest import select_value_bet
+
+    result = select_value_bet(
+        prob_home=0.55,
+        prob_draw=0.25,
+        prob_away=0.20,
+        market_home=0.40,
+        market_draw=0.30,
+        market_away=0.30,
+    )
+    assert result["best_outcome"] == "home"
+    assert result["is_value"] is True
+
+
+def test_select_value_bet_handles_nan_market_probs():
+    """NaN market probabilities (no odds available) must never be flagged
+    as value, and must not raise."""
+    import math
+
+    from eval.backtest import select_value_bet
+
+    result = select_value_bet(
+        prob_home=0.5,
+        prob_draw=0.3,
+        prob_away=0.2,
+        market_home=math.nan,
+        market_draw=math.nan,
+        market_away=math.nan,
+    )
+    assert result["is_value"] is False
+
+
+def test_compute_value_bets_empty_dataframe_no_crash():
+    """Calling compute_value_bets with a zero-row DataFrame must not raise
+    and must return an empty DataFrame with all expected output columns.
+
+    This guards against KeyError from .apply(..., result_type='expand')
+    on empty frames, which never invokes the row lambda and produces no columns.
+    """
+    # Build an empty DataFrame with required input columns.
+    empty_df = pd.DataFrame(
+        {
+            "prob_home": pd.Series(dtype="float64"),
+            "prob_draw": pd.Series(dtype="float64"),
+            "prob_away": pd.Series(dtype="float64"),
+            "home_score": pd.Series(dtype="int64"),
+            "away_score": pd.Series(dtype="int64"),
+        }
+    )
+
+    # Should not raise.
+    result = compute_value_bets(empty_df)
+
+    # Result must be empty and have all expected output columns.
+    assert result.empty
+    assert "margin_home" in result.columns
+    assert "margin_draw" in result.columns
+    assert "margin_away" in result.columns
+    assert "best_edge_outcome" in result.columns
+    assert "best_edge" in result.columns
+    assert "best_market_prob" in result.columns
+    assert "is_value" in result.columns
+    assert "kelly_stake" in result.columns
+    assert "outcome_won" in result.columns
+    assert "flat_return" in result.columns
+    assert "kelly_return" in result.columns

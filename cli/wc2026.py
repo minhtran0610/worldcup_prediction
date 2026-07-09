@@ -8,23 +8,27 @@ import numpy as np
 import pandas as pd
 import typer
 
+from data.ingest.guardian_api import get_api_key as get_guardian_api_key
 from data.ingest.injuries import fetch_wc2026_injuries
 from data.ingest.llm_form import get_all_matches_form
 from data.ingest.odds_live import fetch_upcoming_odds, get_api_key
 from data.ingest.results import drop_wc2026, load_results
-from data.ingest.wc2026 import load_wc2026_schedule
-from eval.backtest import KELLY_FRACTION
+from data.ingest.trajectory import get_team_trajectory
+from data.ingest.wc2026 import inject_completed_wc2026_matches, load_wc2026_schedule
+from eval.backtest import KELLY_FRACTION, MIN_MARKET_PROB, MIN_RELATIVE_EDGE, select_value_bet
 from eval.metrics import remove_margin
 from features.context import WC_2026_HOSTS, derive_context
-from features.elo import compute_elo_ratings, extend_elo_through_matches, get_current_ratings
+from features.elo import compute_elo_ratings, get_current_ratings
 from features.injury import (
     apply_injury_adjustment,
     compute_injury_strength_loss,
 )
 from features.llm_form_feature import (
     apply_sentiment_adjustment,
+    apply_trajectory_adjustment,
     build_sentiment_report_line,
     compute_sentiment_factor,
+    compute_trajectory_factor,
 )
 from features.squad_registry import SquadRegistry
 from models.grid import build_grid, derive_markets
@@ -154,15 +158,17 @@ def _format_telegram_match(
     is_value: bool,
     fa_home,
     fa_away,
+    ta_home,
+    ta_away,
     min_edge: float,
 ) -> str:
     parts: list[str] = []
     parts.append(f"⚽ <b>{home} vs {away}</b>  ·  {_ko_str(kickoff)} UTC")
 
-    # Form
+    # 1. Pre-match sentiment (always-fresh RSS read, single most-recent match)
     if fa_home is not None or fa_away is not None:
         parts.append("")
-        parts.append("<b>📰 Form</b>")
+        parts.append("<b>📰 1. Sentiment Analysis</b>")
         for team, fa in ((home, fa_home), (away, fa_away)):
             if fa is None:
                 parts.append(f"⬜ <b>{team}</b>  no data")
@@ -175,6 +181,23 @@ def _format_telegram_match(
                 f"({fa.n_articles} article(s) — no narrative extracted)"
                 if fa.n_articles > 0
                 else "(no recent articles found)"
+            )
+            parts.append(f"    {ctx}")
+
+    # 2. Multi-match WC2026 trajectory (Guardian archive, requires GUARDIAN_API_KEY)
+    if ta_home is not None or ta_away is not None:
+        parts.append("")
+        parts.append("<b>🧭 2. Form Trajectory</b>")
+        for team, ta in ((home, ta_home), (away, ta_away)):
+            if ta is None:
+                parts.append(f"⬜ <b>{team}</b>  no data")
+                continue
+            emoji = "🟢" if ta.form_score > 0.15 else ("🔴" if ta.form_score < -0.15 else "🟡")
+            parts.append(f"{emoji} <b>{team}</b>  {ta.form_score:+.2f} ({ta.confidence:.0%} conf)")
+            ctx = ta.performance_context or (
+                "(no trajectory narrative extracted)"
+                if ta.confidence > 0
+                else "(no completed matches / no signal yet)"
             )
             parts.append(f"    {ctx}")
 
@@ -387,14 +410,25 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
     if model_name == "neural":
         from models.neural import NeuralModel
 
-        if checkpoint is not None and Path(checkpoint).exists():
-            try:
-                m = NeuralModel.load(str(checkpoint))
-                m._train_results = results
-                return m
-            except Exception as exc:
+        if checkpoint is not None:
+            if Path(checkpoint).exists():
+                try:
+                    m = NeuralModel.load(str(checkpoint))
+                    m._train_results = results
+                    return m
+                except Exception as exc:
+                    typer.echo(
+                        f"Warning: could not load checkpoint {checkpoint}: {exc} "
+                        "— fitting from scratch.",
+                        err=True,
+                    )
+            else:
                 typer.echo(
-                    f"Warning: could not load checkpoint {checkpoint}: {exc} — fitting from scratch.",
+                    f"Warning: checkpoint {checkpoint} not found (resolved to "
+                    f"{Path(checkpoint).resolve()}) — fitting from scratch. "
+                    "This retrains on the full historical dataset and can take a long time; "
+                    "if this is unexpected, check you're running from the project root or "
+                    "pass an absolute --checkpoint path.",
                     err=True,
                 )
         m = NeuralModel()
@@ -417,80 +451,36 @@ def _fit_model(model_name: str, results: pd.DataFrame, checkpoint: Path | None):
         constituents: list = [dc, xgb]
         weights: list[float] = [0.5, 0.5]
 
-        if checkpoint is not None and Path(checkpoint).exists():
-            from models.neural import NeuralModel
+        if checkpoint is not None:
+            if Path(checkpoint).exists():
+                from models.neural import NeuralModel
 
-            typer.echo(f"Loading neural checkpoint from {checkpoint}...", err=True)
-            try:
-                neural = NeuralModel.load(str(checkpoint))
-                neural._train_results = results
-                constituents.append(neural)
-                # Equal weight across all three
-                n = len(constituents)
-                weights = [1.0 / n] * n
-                typer.echo("Neural model included in ensemble.", err=True)
-            except Exception as exc:
+                typer.echo(f"Loading neural checkpoint from {checkpoint}...", err=True)
+                try:
+                    neural = NeuralModel.load(str(checkpoint))
+                    neural._train_results = results
+                    constituents.append(neural)
+                    # Equal weight across all three
+                    n = len(constituents)
+                    weights = [1.0 / n] * n
+                    typer.echo("Neural model included in ensemble.", err=True)
+                except Exception as exc:
+                    typer.echo(
+                        f"Warning: could not load neural checkpoint: {exc} "
+                        "— using DC+XGB ensemble.",
+                        err=True,
+                    )
+            else:
                 typer.echo(
-                    f"Warning: could not load neural checkpoint: {exc} — using DC+XGB ensemble.",
+                    f"Warning: checkpoint {checkpoint} not found (resolved to "
+                    f"{Path(checkpoint).resolve()}) — using DC+XGB ensemble without the "
+                    "neural component.",
                     err=True,
                 )
 
         return EnsembleModel(models=constituents, weights=weights)
 
     raise ValueError(f"Unknown model: {model_name!r}. Use 'dc', 'xgb', 'neural', or 'ensemble'.")
-
-
-# ---------------------------------------------------------------------------
-# Completed-match injection helper
-# ---------------------------------------------------------------------------
-
-
-def _inject_completed_wc_matches(
-    results: pd.DataFrame,
-    completed: pd.DataFrame,
-    registry: SquadRegistry,
-) -> pd.DataFrame:
-    """Inject all completed WC matches into training context and return updated results."""
-    to_inject = completed.copy()
-    if to_inject.empty:
-        return results
-
-    to_inject["date"] = to_inject["date"].fillna(pd.Timestamp("2026-06-11"))
-    to_inject = to_inject.sort_values("date").reset_index(drop=True)
-    to_inject["neutral"] = True
-    to_inject["tournament"] = "FIFA World Cup"
-    to_inject = extend_elo_through_matches(results, to_inject)
-    to_inject["country"] = "United States"
-    to_inject["is_knockout"] = True
-    to_inject["is_host_home"] = to_inject["home_team"].isin(WC_2026_HOSTS)
-    to_inject["is_host_away"] = to_inject["away_team"].isin(WC_2026_HOSTS)
-    to_inject["rest_days_home"] = 7.0
-    to_inject["rest_days_away"] = 7.0
-    to_inject["sample_weight"] = 1.0
-    for col in [
-        "squad_top5_home",
-        "squad_top5_away",
-        "squad_caps_home",
-        "squad_caps_away",
-        "squad_goals_home",
-        "squad_goals_away",
-    ]:
-        to_inject[col] = 0.0
-    for i, wc_row in to_inject.iterrows():
-        fh = registry.get_features(wc_row["home_team"], 2026, "FIFA World Cup")
-        fa = registry.get_features(wc_row["away_team"], 2026, "FIFA World Cup")
-        to_inject.at[i, "squad_top5_home"] = fh["top5_share"]
-        to_inject.at[i, "squad_top5_away"] = fa["top5_share"]
-        to_inject.at[i, "squad_caps_home"] = fh["avg_caps_norm"]
-        to_inject.at[i, "squad_caps_away"] = fa["avg_caps_norm"]
-        to_inject.at[i, "squad_goals_home"] = fh["intl_goals_per_cap"]
-        to_inject.at[i, "squad_goals_away"] = fa["intl_goals_per_cap"]
-
-    return (
-        pd.concat([results, to_inject], ignore_index=True)
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +569,12 @@ def main(
         help="Neural checkpoint path (for neural/ensemble); loaded if present, else fits fresh",
     ),
     min_edge: float = typer.Option(0.02, help="Minimum edge to flag as value bet"),
+    min_market_prob: float = typer.Option(
+        MIN_MARKET_PROB, help="Minimum market-implied probability to consider for a value bet"
+    ),
+    min_relative_edge: float = typer.Option(
+        MIN_RELATIVE_EDGE, help="Minimum edge as a fraction of market probability"
+    ),
     show_all: bool = typer.Option(False, help="Show all matches, not just value bets"),
     injuries: bool = typer.Option(True, help="Apply injury/suspension λ adjustment"),
     injury_k: float = typer.Option(0.5, help="Injury dampening coefficient K (0–1)"),
@@ -588,6 +584,11 @@ def main(
         help="Apply LLM narrative tournament-form adjustment (~2 min). On by default.",
     ),
     llm_model: str = typer.Option("qwen3.5:9b", help="Ollama model for LLM form analysis"),
+    trajectory: bool = typer.Option(
+        True,
+        "--trajectory/--no-trajectory",
+        help="Apply WC2026 match-by-match trajectory lambda adjustment (requires GUARDIAN_API_KEY).",
+    ),
     next_only: bool = typer.Option(
         False,
         "--next/--all",
@@ -651,6 +652,7 @@ def main(
     typer.echo("Fetching WC 2026 schedule (live)...", err=True)
     schedule = load_wc2026_schedule(force_refresh=True)
 
+    completed = schedule.iloc[0:0]
     if not schedule.empty:
         completed = (
             schedule[schedule["is_completed"]].dropna(subset=["home_score", "away_score"]).copy()
@@ -659,7 +661,7 @@ def main(
             completed["home_score"] = completed["home_score"].astype(int)
             completed["away_score"] = completed["away_score"].astype(int)
             n_before_injection = len(results)
-            results = _inject_completed_wc_matches(results, completed, registry)
+            results = inject_completed_wc2026_matches(results, completed, registry)
             typer.echo(
                 f"Injected {len(results) - n_before_injection} completed WC 2026 match(es)"
                 " into training context.",
@@ -890,6 +892,70 @@ def main(
             else:
                 typer.echo("No sentiment signal above confidence threshold.", err=True)
 
+    # 7d. WC2026 match-by-match trajectory adjustment (requires GUARDIAN_API_KEY)
+    trajectory_analyses: dict = {}
+
+    if trajectory and get_guardian_api_key():
+        typer.echo("Computing WC2026 trajectory adjustment...", err=True)
+        teams_in_play = list(
+            {t for row in upcoming.itertuples(index=False) for t in (row.home_team, row.away_team)}
+        )
+        trajectory_factors: dict[str, float] = {}
+        for team in teams_in_play:
+            team_matches = completed[
+                (completed["home_team"] == team) | (completed["away_team"] == team)
+            ]
+            if team_matches.empty:
+                trajectory_factors[team] = 1.0
+                note = f"  {team:<22}  trajectory: no completed WC2026 match(es) yet  λ unchanged"
+                typer.echo(note, err=True)
+                form_notes.append(note)
+                continue
+            analysis = get_team_trajectory(team, team_matches)
+            factor = compute_trajectory_factor(analysis)
+            trajectory_factors[team] = factor
+            trajectory_analyses[team] = analysis
+            note = (
+                f"  {team:<22}  trajectory across {len(team_matches)} match(es)"
+                f"  conf {analysis.confidence:.2f}  λ×{factor:.3f}"
+            )
+            typer.echo(note, err=True)
+            form_notes.append(note)
+            if analysis.performance_context:
+                form_notes.append(f"    {analysis.performance_context}")
+
+        n_trajectory = 0
+        for i, uprow in enumerate(upcoming.itertuples(index=False)):
+            home, away = uprow.home_team, uprow.away_team
+            fh = trajectory_factors.get(home, 1.0)
+            fa = trajectory_factors.get(away, 1.0)
+            if fh == 1.0 and fa == 1.0:
+                continue
+
+            lh = float(pred_batch["lambda_home"].iloc[i])
+            la = float(pred_batch["lambda_away"].iloc[i])
+            rho = float(pred_batch["rho"].iloc[i])
+            lh_adj, la_adj, _ = apply_trajectory_adjustment(lh, la, rho, fh, fa)
+
+            grid_adj = build_grid(lh_adj, la_adj, rho)
+            markets = derive_markets(grid_adj)
+            goals = np.arange(grid_adj.shape[0], dtype=np.float64)
+
+            pred_batch.at[i, "lambda_home"] = lh_adj
+            pred_batch.at[i, "lambda_away"] = la_adj
+            pred_batch.at[i, "prob_home"] = markets["home_win"]
+            pred_batch.at[i, "prob_draw"] = markets["draw"]
+            pred_batch.at[i, "prob_away"] = markets["away_win"]
+            pred_batch.at[i, "expected_home"] = float(np.dot(goals, grid_adj.sum(axis=1)))
+            pred_batch.at[i, "expected_away"] = float(np.dot(goals, grid_adj.sum(axis=0)))
+            pred_batch.at[i, "grid"] = grid_adj
+            n_trajectory += 1
+
+        if n_trajectory:
+            typer.echo(f"Trajectory adjustment applied to {n_trajectory} match(es).", err=True)
+    elif trajectory:
+        typer.echo("GUARDIAN_API_KEY not set — skipping trajectory adjustment.", err=True)
+
     # ------------------------------------------------------------------
     # 8. Build output rows and market detail blocks (no printing yet)
     # ------------------------------------------------------------------
@@ -934,15 +1000,21 @@ def main(
             }
             market_probs = remove_margin(raw_odds_dict)
 
-            edges = {
-                "home": (prob_home - market_probs["home"], raw_odds_home),
-                "draw": (prob_draw - market_probs["draw"], raw_odds_draw),
-                "away": (prob_away - market_probs["away"], raw_odds_away),
-            }
-            best_outcome = max(edges, key=lambda k: edges[k][0])
-            best_edge, best_decimal_odds = edges[best_outcome]
-
-            is_value = best_edge >= min_edge
+            selection = select_value_bet(
+                prob_home,
+                prob_draw,
+                prob_away,
+                market_probs["home"],
+                market_probs["draw"],
+                market_probs["away"],
+                min_edge=min_edge,
+                min_market_prob=min_market_prob,
+                min_relative_edge=min_relative_edge,
+            )
+            best_outcome = selection["best_outcome"]
+            best_edge = selection["best_edge"]
+            is_value = selection["is_value"]
+            best_decimal_odds = raw_odds_dict[best_outcome]
 
             kelly = (
                 KELLY_FRACTION * best_edge / best_decimal_odds
@@ -1043,14 +1115,21 @@ def main(
                     if raw_d > 0.0 and np.isfinite(raw_d):
                         raw_odds_dict = {"home": raw_h, "draw": raw_d, "away": raw_a}
                         _market_probs = remove_margin(raw_odds_dict)
-                        edges = {
-                            "home": (prob_home - _market_probs["home"], raw_h),
-                            "draw": (prob_draw - _market_probs["draw"], raw_d),
-                            "away": (prob_away - _market_probs["away"], raw_a),
-                        }
-                        _best_outcome = max(edges, key=lambda k: edges[k][0])
-                        _best_edge, _best_decimal_odds = edges[_best_outcome]
-                        _is_value = _best_edge >= min_edge
+                        _selection = select_value_bet(
+                            prob_home,
+                            prob_draw,
+                            prob_away,
+                            _market_probs["home"],
+                            _market_probs["draw"],
+                            _market_probs["away"],
+                            min_edge=min_edge,
+                            min_market_prob=min_market_prob,
+                            min_relative_edge=min_relative_edge,
+                        )
+                        _best_outcome = _selection["best_outcome"]
+                        _best_edge = _selection["best_edge"]
+                        _is_value = _selection["is_value"]
+                        _best_decimal_odds = raw_odds_dict[_best_outcome]
                         _kelly = (
                             KELLY_FRACTION * _best_edge / _best_decimal_odds
                             if _is_value and _best_decimal_odds > 1.0
@@ -1075,6 +1154,8 @@ def main(
                 is_value=_is_value,
                 fa_home=form_analyses.get(home),
                 fa_away=form_analyses.get(away),
+                ta_home=trajectory_analyses.get(home),
+                ta_away=trajectory_analyses.get(away),
                 min_edge=min_edge,
             )
             telegram_blocks.append(block)

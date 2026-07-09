@@ -1,8 +1,10 @@
+import sys
 from pathlib import Path
 
 import pandas as pd
 
 from data.ingest.cache import load_cache, save_cache
+from data.ingest.extra_time import GOALSCORERS_CSV_DEFAULT, correct_extra_time_scores
 
 RESULTS_CACHE_KEY: str = "results"
 
@@ -38,6 +40,7 @@ KEEP_COLUMNS: list[str] = [
 def load_results(
     csv_path: Path | None = None,
     force_refresh: bool = False,
+    goalscorers_csv_path: Path | None = None,
 ) -> pd.DataFrame:
     if not force_refresh:
         cached = load_cache(RESULTS_CACHE_KEY)
@@ -69,6 +72,16 @@ def load_results(
 
     df["home_score"] = df["home_score"].astype(int)
     df["away_score"] = df["away_score"].astype(int)
+
+    gs_path = Path(goalscorers_csv_path) if goalscorers_csv_path else GOALSCORERS_CSV_DEFAULT
+    if gs_path.exists():
+        goalscorers = pd.read_csv(gs_path)
+        df = correct_extra_time_scores(df, goalscorers)
+    else:
+        print(
+            f"[results] goalscorers CSV not found at {gs_path} — skipping extra-time correction.",
+            file=sys.stderr,
+        )
 
     df = df.sort_values("date", ascending=True).reset_index(drop=True)
 

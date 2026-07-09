@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
+
+from data.ingest.results import is_wc2026_match
 
 if TYPE_CHECKING:
     from features.squad_registry import SquadRegistry
 
 FRIENDLY_SAMPLE_WEIGHT: float = 0.2
 FRIENDLY_TOURNAMENT: str = "Friendly"
+RECENCY_HALF_LIFE_DAYS: float = 365.0 * 3
+WC2026_BOOST: float = 1.0
 
 KNOCKOUT_TOURNAMENTS: frozenset[str] = frozenset(
     {
@@ -22,6 +27,36 @@ KNOCKOUT_TOURNAMENTS: frozenset[str] = frozenset(
 )
 
 WC_2026_HOSTS: frozenset[str] = frozenset({"United States", "Canada", "Mexico"})
+
+
+def compute_sample_weight(results: pd.DataFrame) -> pd.Series:
+    """Return per-row training weight: tournament_base x recency x wc2026_boost.
+
+    tournament_base: FRIENDLY_SAMPLE_WEIGHT for friendlies, 1.0 otherwise.
+    recency: exponential decay with a RECENCY_HALF_LIFE_DAYS half-life,
+      relative to the most recent date in `results` — a gentle decay
+      (years, not days) since this trains once over ~150 years of history,
+      unlike Dixon-Coles' much steeper per-refit xi decay.
+    wc2026_boost: WC2026_BOOST multiplier on WC 2026 matches, on top of
+      recency. Left at 1.0 (no-op) as of 2026-07-09: a chronological sweep
+      (train on history + completed group stage, boost values 1/4/8/12/16/24,
+      eval RPS/NLL/accuracy on the 26 held-out completed knockout matches)
+      showed accuracy degrading monotonically from 65% at boost=1.0 to 54%
+      at boost=24 — plain recency already weights same-week matches near 1.0,
+      so the extra multiplier only let a small group-stage sample dominate
+      gradients and overfit to group-stage-specific patterns that don't
+      transfer to knockout football. Re-validate with the same sweep
+      methodology if this is revisited.
+    """
+    base = results["tournament"].apply(
+        lambda t: FRIENDLY_SAMPLE_WEIGHT if t == FRIENDLY_TOURNAMENT else 1.0
+    )
+    dates = results["date"]
+    latest = dates.max()
+    days_ago = (latest - dates).dt.days.clip(lower=0)
+    recency = 0.5 ** (days_ago / RECENCY_HALF_LIFE_DAYS)
+    boost = np.where(is_wc2026_match(results), WC2026_BOOST, 1.0)
+    return base * recency * boost
 
 
 def derive_context(
@@ -54,9 +89,7 @@ def derive_context(
     out["is_knockout"] = out["tournament"].isin(KNOCKOUT_TOURNAMENTS)
     out["is_host_home"] = out["home_team"].isin(WC_2026_HOSTS)
     out["is_host_away"] = out["away_team"].isin(WC_2026_HOSTS)
-    out["sample_weight"] = out["tournament"].apply(
-        lambda t: FRIENDLY_SAMPLE_WEIGHT if t == FRIENDLY_TOURNAMENT else 1.0
-    )
+    out["sample_weight"] = compute_sample_weight(out)
 
     # Squad quality features (default 0.0; populated if registry is provided)
     out["squad_top5_home"] = 0.0

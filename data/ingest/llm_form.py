@@ -42,6 +42,11 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import cast
+
+import pandas as pd
+
+from data.ingest import guardian_api
 
 _OLLAMA_BASE = _os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 _OLLAMA_TIMEOUT = 45  # seconds — allow for cold model load
@@ -181,7 +186,7 @@ def _fetch_rss(url: str) -> list[dict]:
     ]
 
 
-def _clean_html(text: str) -> str:
+def clean_html(text: str) -> str:
     """Strip tags and decode HTML entities."""
     text = re.sub(r"<[^>]+>", " ", text)
     text = html.unescape(text)
@@ -224,7 +229,7 @@ def _fetch_article_text(url: str) -> str:
         return ""
     # Collect <p> tags with enough content (≥60 chars after tag-stripping)
     paras = re.findall(r"<p[^>]*>(.*?)</p>", raw, re.DOTALL)
-    cleaned = [_clean_html(p) for p in paras]
+    cleaned = [clean_html(p) for p in paras]
     cleaned = [
         p
         for p in cleaned
@@ -311,7 +316,7 @@ def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[s
             continue
         title_lower = item["title"].lower()
         # Strip HTML before counting — Guardian descriptions embed team names in href attrs
-        desc_clean = _clean_html(item["description"]).lower()
+        desc_clean = clean_html(item["description"]).lower()
         in_title = any(term in title_lower for term in search_lower)
         # Description-only: require term appears at least twice in plain text to avoid noise
         if not in_title:
@@ -331,7 +336,7 @@ def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[s
         return [], []
 
     urls = [m["link"] for m in matched]
-    rss_descs = {m["link"]: _clean_html(m["title"] + ". " + m["description"]) for m in matched}
+    rss_descs = {m["link"]: clean_html(m["title"] + ". " + m["description"]) for m in matched}
 
     # BBC, Guardian, and ESPN: fetch full article body (<p> extraction works for all three).
     # Guardian and ESPN boilerplate is filtered in _fetch_article_text via _is_boilerplate().
@@ -358,6 +363,42 @@ def fetch_team_news(team: str, max_articles: int = 6) -> tuple[list[str], list[s
             texts.append(desc)
 
     texts = [t for t in texts if t]
+    return texts, urls
+
+
+def fetch_team_match_report(
+    team: str,
+    opponent: str,
+    match_date: pd.Timestamp,
+    api_key: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Fetch a post-match report for one specific completed match via the
+    Guardian Content API's archive search.
+
+    fetch_team_news (RSS-based) can't reach matches whose reports have
+    already rotated out of the live feed — this function exists for exactly
+    that case: retroactively recovering earlier WC2026 match reports.
+
+    Searches a 2-day window starting on match_date. Filters results to those
+    whose title mentions the team (via the existing _SEARCH_TERMS keyword
+    map) to reduce false positives from the Guardian's broader query match.
+    Returns ([], []) on no results or API failure.
+    """
+    query = f"{team} {opponent}"
+    to_date = cast(pd.Timestamp, match_date + pd.Timedelta(days=2))
+    articles = guardian_api.search_articles(query, match_date, to_date, api_key=api_key)
+
+    search_terms = [t.lower() for t in _SEARCH_TERMS.get(team, [team])]
+    texts: list[str] = []
+    urls: list[str] = []
+    for a in articles:
+        title_lower = a["title"].lower()
+        if not any(term in title_lower for term in search_terms):
+            continue
+        body = clean_html(a["body_html"])[:_MAX_COMBINED_CHARS]
+        if body:
+            texts.append(body)
+            urls.append(a["url"])
     return texts, urls
 
 
@@ -418,9 +459,147 @@ _USER_TEMPLATE = (
     "Reserve high confidence for genuinely strong, well-sourced evidence>}}"
 )
 
+# ── Trajectory prompt (multi-match, chronologically ordered) ──────────────────
+# Separate from _SYSTEM_PROMPT/_USER_TEMPLATE above, which stay single-article
+# and are still used by the pre-match sentiment path. This prompt explicitly
+# frames the input as an ordered sequence of post-match reports and asks the
+# model to reason about how form has changed ACROSS matches, not just what is
+# true in any one of them — see data.ingest.trajectory.get_team_trajectory.
 
-def _call_ollama(team: str, combined_text: str, model: str) -> dict:
+# The trajectory prompt asks for a longer response than the single-match one
+# (2-4 sentences of cross-match narrative vs. 1-3, plus lists potentially
+# aggregated across multiple matches) — the default 400-token budget can cut
+# the JSON off mid-generation on richer inputs, which surfaces as a parse
+# failure rather than a truncation warning.
+_TRAJECTORY_NUM_PREDICT = 600
+
+# Ollama defaults to a 4096-token context window regardless of what a model
+# architecturally supports, UNLESS num_ctx is set explicitly in the request —
+# verified empirically (a 52k-char prompt with a marker near the end came
+# back with prompt_eval_count=4096 and the model never saw the marker). Our
+# previous _MAX_TRAJECTORY_CHARS=16000 app-level cap was masking this same
+# ceiling, and a naive join-then-slice was silently dropping whichever
+# matches didn't fit — e.g. a 5-match trajectory where the first two
+# matches' articles alone exceeded the cap, so the model never saw the last
+# three matches (including a 3-0 win) at all.
+#
+# Empirically tested on this project's RTX 4070 Ti Super (16GB VRAM) via
+# `ollama ps` + `nvidia-smi` while loading qwen3.5:9b (Q4_K_M):
+#   num_ctx=65536   -> 100% GPU, ~11GB used, ~5.4GB free
+#   num_ctx=131072  -> 100% GPU, ~14GB used, ~2.6GB free  (largest still 100% GPU)
+#   num_ctx=262144  -> model's advertised max, but spills to 31%/69% CPU/GPU
+#                      (much slower — not worth it)
+# 131072 chosen over 65536: a deep-tournament team (finalist, 7 matches) with
+# heavy Guardian coverage could plausibly need ~70k+ tokens, uncomfortably
+# close to 65536's ceiling — 131072 gives real margin for that actual worst
+# case while still running 100% on GPU. The per-match/combined character
+# truncation this replaced is removed entirely — num_ctx is now the real,
+# properly-sized boundary instead of an arbitrary undersized guess.
+_TRAJECTORY_NUM_CTX = 131072
+
+# The single-match sentiment path's input is much smaller (one match's
+# articles, already capped at _MAX_COMBINED_CHARS=8000 chars each), but set
+# explicitly rather than relying on Ollama's undocumented-in-code default.
+_SENTIMENT_NUM_CTX = 8192
+
+_SYSTEM_PROMPT_TRAJECTORY = (
+    "You are a football analyst extracting a team's CURRENT performance trajectory from a "
+    "sequence of post-match reports, one per completed match, given to you in chronological "
+    "order. Extract ANYTHING the reports say about how the team is playing — results, "
+    "scorelines, style, morale, momentum, manager situation, key players — and reason about "
+    "how it has CHANGED across matches, not just what is true in any single one.\n\n"
+    "Extract especially:\n"
+    "  - Results and how they happened: scorelines, margin of victory/defeat, whether the "
+    "result flattered or understated performance ('thumping', 'comfortable', 'lucky', "
+    "'dominant', 'outplayed', 'deserved more').\n"
+    "  - Trajectory: is the team improving, declining, or inconsistent across these matches? "
+    "Weight more recent matches more heavily than earlier ones when they conflict — a team "
+    "that lost game 1 and dominated games 2-3 is trending up, not down.\n"
+    "  - Team and manager signals: tactical setup, dressing-room atmosphere, coach "
+    "statements, player form, squad cohesion or unrest, and whether these are getting "
+    "better or worse across the sequence.\n"
+    "  - Confirmed absences: players explicitly described as OUT, injured, suspended, "
+    "or sent off FOR THE NEXT MATCH. Do NOT include players described as 'doubtful', "
+    "'carrying a knock', 'returned to training', 'returning', 'expected back', 'set to "
+    "return', 'available', or 'back in the squad' — these players are NOT absent. "
+    "Past absences that have ended are NOT absences.\n\n"
+    "RULES:\n"
+    "1. Only use information EXPLICITLY stated in the text — no external knowledge.\n"
+    "2. performance_context: ALWAYS fill this. Summarise the team's trajectory across ALL "
+    "matches given, not just the most recent one — name the direction (improving/declining/"
+    "steady) explicitly in prose. If genuinely nothing is said, explain what the reports "
+    "covered instead.\n"
+    "3. form_score [-1, 1]: overall CURRENT momentum, informed by the trajectory across all "
+    "matches but weighted toward the most recent. Positive = playing well / rising / "
+    "confident. Negative = struggling / unsettled / weakened. 0 = nothing to go on.\n"
+    "4. confidence [0, 1]: how much evidence you have ACROSS ALL matches given. 0 = team "
+    "barely mentioned in any report. 0.5 = some signal in a few reports. 0.9+ = multiple "
+    "clear statements about form and momentum across most/all matches.\n"
+    "5. Output valid JSON only — no markdown, no text outside the JSON object."
+)
+
+_USER_TEMPLATE_TRAJECTORY = (
+    "Analyse the following chronological sequence of post-match reports about {team} and "
+    "extract structured trajectory signals.\n\n"
+    "CRITICAL: You are ONLY extracting data for {team}. Ignore opponent-specific detail "
+    "except as context for {team}'s own performance — do not list opponent players in "
+    "key_absences, do not score the opponent's morale.\n\n"
+    "REPORTS (chronological order, earliest match first):\n{text}\n\n"
+    "Return JSON with EXACTLY this schema (no extra keys):\n"
+    '{{"form_score": <float -1.0 to 1.0: {team}\'s CURRENT momentum after all matches above, '
+    "weighted toward the most recent>, "
+    '"performance_context": "<string: REQUIRED — 2-4 sentences describing how {team}\'s form '
+    "has evolved across these matches (improving/declining/steady) and why, OR if no signal, "
+    'a brief explanation of what the reports covered and why no trajectory could be extracted>", '
+    '"key_absences": [<strings: names of {team} players confirmed absent for their NEXT match — '
+    "never list players from opposing teams>], "
+    '"morale_signals": [<strings: direct short phrases from the reports indicating {team} '
+    "morale or atmosphere, across all matches>], "
+    '"tactical_notes": "<string: {team} tactical changes or coach statements across the '
+    'reports, empty if none>", '
+    '"confidence": <float 0.0 to 1.0: how strongly the reports collectively support your '
+    "form_score. 0=team barely mentioned; 0.3-0.5=some signal but thin/mixed across matches; "
+    "0.7-1.0=multiple clear, decisive statements across most matches. Reserve high confidence "
+    "for genuinely strong, well-sourced evidence>}}"
+)
+
+
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
+
+
+def _strip_markdown_fence(content: str) -> str:
+    """Strip a wrapping ```json ... ``` (or plain ``` ... ```) code fence.
+
+    `format: "json"` isn't always strictly enforced — qwen3.5:9b has been
+    observed wrapping otherwise-valid JSON in a markdown fence despite it,
+    which breaks json.loads at char 0 (a backtick, not `{`). Returns content
+    unchanged if it isn't fenced.
+    """
+    match = _CODE_FENCE_RE.match(content.strip())
+    return match.group(1) if match else content
+
+
+def _call_ollama(
+    system_prompt: str,
+    user_content: str,
+    model: str,
+    num_predict: int = 400,
+    num_ctx: int = _SENTIMENT_NUM_CTX,
+) -> dict:
     """POST extraction request to Ollama. Returns parsed JSON dict.
+
+    num_predict caps the output token budget. The default (400) fits the
+    single-match prompt's shorter expected output; callers asking for a
+    longer response (e.g. analyse_team_trajectory's multi-match synthesis)
+    should pass a larger value — otherwise the model's JSON can get cut off
+    mid-generation, which surfaces as a JSON parse failure here, not a
+    truncation warning.
+
+    num_ctx caps the total context window (prompt + response). Ollama
+    silently truncates to a small default (observed: 4096 tokens) if this
+    isn't set explicitly, regardless of what the model itself supports —
+    always pass a value sized for the actual input, not just accept the
+    default.
 
     Raises ConnectionError if Ollama is not reachable.
     Raises ValueError if response is not valid JSON.
@@ -431,13 +610,15 @@ def _call_ollama(team: str, combined_text: str, model: str) -> dict:
             "stream": False,
             "think": False,  # critical: disables internal reasoning trace
             "format": "json",
-            "options": {"num_predict": 400, "temperature": 0.1, "top_k": 20},
+            "options": {
+                "num_predict": num_predict,
+                "num_ctx": num_ctx,
+                "temperature": 0.1,
+                "top_k": 20,
+            },
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": _USER_TEMPLATE.format(team=team, text=combined_text),
-                },
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
             ],
         }
     ).encode()
@@ -458,7 +639,19 @@ def _call_ollama(team: str, combined_text: str, model: str) -> dict:
     if not content:
         raise ValueError(f"Empty content from Ollama (model={model}). Check think=False.")
 
-    return json.loads(content)
+    try:
+        return json.loads(_strip_markdown_fence(content))
+    except json.JSONDecodeError as exc:
+        # done_reason="length" means num_predict cut generation off mid-JSON;
+        # anything else (e.g. "stop") means the model finished normally but
+        # produced non-JSON content (a leaked <think> block, prose preamble,
+        # etc.) — two different root causes needing two different fixes, so
+        # surface the raw content rather than just "invalid JSON" every time.
+        done_reason = result.get("done_reason", "unknown")
+        raise ValueError(
+            f"Ollama returned unparseable JSON (model={model}, done_reason={done_reason!r}, "
+            f"content_len={len(content)}): {content[:800]!r}"
+        ) from exc
 
 
 def _validate_raw(raw: dict, team: str) -> FormAnalysis:
@@ -508,7 +701,7 @@ def analyse_team_form(
     combined = "\n\n---\n\n".join(texts)[:_MAX_COMBINED_CHARS]
 
     try:
-        raw = _call_ollama(team, combined, model)
+        raw = _call_ollama(_SYSTEM_PROMPT, _USER_TEMPLATE.format(team=team, text=combined), model)
     except ConnectionError as exc:
         print(f"[llm_form] Ollama unavailable: {exc}", file=sys.stderr)
         return FormAnalysis.neutral(team, str(exc))
@@ -522,6 +715,62 @@ def analyse_team_form(
     analysis = _validate_raw(raw, team)
     analysis.sources = urls or []
     analysis.n_articles = len(texts)
+    return analysis
+
+
+def analyse_team_trajectory(
+    team: str,
+    match_blocks: list[str],
+    urls: list[str] | None = None,
+    model: str = DEFAULT_MODEL,
+) -> FormAnalysis:
+    """Extract a single trajectory-level FormAnalysis from N pre-labeled,
+    chronologically-ordered post-match report blocks (see
+    data.ingest.trajectory.get_team_trajectory for block construction —
+    each block covers one completed match, labeled with match number,
+    opponent, and result).
+
+    Structurally parallel to analyse_team_form, but uses a prompt
+    (_SYSTEM_PROMPT_TRAJECTORY / _USER_TEMPLATE_TRAJECTORY) that explicitly
+    frames the input as an ordered sequence and asks the model to reason
+    about how form has changed across matches — one LLM call per team,
+    rather than one per match aggregated numerically afterward.
+
+    Returns FormAnalysis.neutral() immediately if match_blocks is empty (no
+    LLM call). Returns neutral FormAnalysis with error set on any
+    Ollama/parse failure. n_articles is set from len(urls) — one URL per
+    source article across all matches, not per match.
+    """
+    if not match_blocks:
+        return FormAnalysis.neutral(team)
+
+    # No character truncation here — num_ctx=_TRAJECTORY_NUM_CTX (see comment
+    # above the constant) is sized to comfortably fit every match's full
+    # article text, so there's no need to cut anything and risk silently
+    # dropping a match the way the old char-cap-on-the-joined-whole did.
+    combined = "\n\n---\n\n".join(match_blocks)
+
+    try:
+        raw = _call_ollama(
+            _SYSTEM_PROMPT_TRAJECTORY,
+            _USER_TEMPLATE_TRAJECTORY.format(team=team, text=combined),
+            model,
+            num_predict=_TRAJECTORY_NUM_PREDICT,
+            num_ctx=_TRAJECTORY_NUM_CTX,
+        )
+    except ConnectionError as exc:
+        print(f"[llm_form] Ollama unavailable: {exc}", file=sys.stderr)
+        return FormAnalysis.neutral(team, str(exc))
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"[llm_form] JSON parse failed for {team!r}: {exc}", file=sys.stderr)
+        return FormAnalysis.neutral(team, str(exc))
+    except Exception as exc:
+        print(f"[llm_form] Unexpected error for {team!r}: {exc}", file=sys.stderr)
+        return FormAnalysis.neutral(team, str(exc))
+
+    analysis = _validate_raw(raw, team)
+    analysis.sources = urls or []
+    analysis.n_articles = len(urls or [])
     return analysis
 
 

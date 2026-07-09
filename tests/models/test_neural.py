@@ -346,3 +346,108 @@ def test_neural_fit_with_explicit_val_results():
     totals = result["prob_home"] + result["prob_draw"] + result["prob_away"]
     for i, total in enumerate(totals):
         assert total == pytest.approx(1.0, abs=1e-6), f"Row {i}: sum={total}"
+
+
+# ---------------------------------------------------------------------------
+# Weighted loss
+# ---------------------------------------------------------------------------
+
+
+def test_nll_loss_batch_weighted_matches_manual_weighted_mean():
+    from models.neural import _nll_loss_batch
+
+    lambda_home = torch.tensor([1.0, 2.0])
+    lambda_away = torch.tensor([1.0, 2.0])
+    rho = torch.tensor([0.0, 0.0])
+    home_scores = torch.tensor([1, 2])
+    away_scores = torch.tensor([1, 2])
+    weights = torch.tensor([1.0, 3.0])
+
+    loss_0 = _nll_loss_batch(
+        lambda_home[:1],
+        lambda_away[:1],
+        rho[:1],
+        home_scores[:1],
+        away_scores[:1],
+        torch.tensor([1.0]),
+    )
+    loss_1 = _nll_loss_batch(
+        lambda_home[1:],
+        lambda_away[1:],
+        rho[1:],
+        home_scores[1:],
+        away_scores[1:],
+        torch.tensor([1.0]),
+    )
+
+    weighted = _nll_loss_batch(lambda_home, lambda_away, rho, home_scores, away_scores, weights)
+    expected = (loss_0 * 1.0 + loss_1 * 3.0) / (1.0 + 3.0)
+    assert weighted.item() == pytest.approx(expected.item(), abs=1e-5)
+
+
+def test_nll_loss_batch_uniform_weights_equals_plain_mean():
+    from models.neural import _nll_loss_batch
+
+    lambda_home = torch.tensor([1.0, 2.0, 1.5])
+    lambda_away = torch.tensor([1.0, 2.0, 1.5])
+    rho = torch.tensor([0.0, 0.0, 0.0])
+    home_scores = torch.tensor([1, 2, 0])
+    away_scores = torch.tensor([1, 2, 1])
+
+    uniform_weights = torch.ones(3)
+    weighted = _nll_loss_batch(
+        lambda_home, lambda_away, rho, home_scores, away_scores, uniform_weights
+    )
+
+    per_sample = [
+        _nll_loss_batch(
+            lambda_home[i : i + 1],
+            lambda_away[i : i + 1],
+            rho[i : i + 1],
+            home_scores[i : i + 1],
+            away_scores[i : i + 1],
+            torch.tensor([1.0]),
+        ).item()
+        for i in range(3)
+    ]
+    expected = sum(per_sample) / 3
+    assert weighted.item() == pytest.approx(expected, abs=1e-5)
+
+
+def test_neural_fit_respects_nonuniform_sample_weight_without_crashing():
+    """fit() must accept a non-uniform sample_weight column and still produce
+    valid (probability-summing-to-one) predictions."""
+    results = make_results(120)
+    results["sample_weight"] = [1.0] * 60 + [5.0] * 60
+    model = _small_model()
+    model.fit(results)
+
+    out = model.predict_batch(results.head(5))
+    totals = out["prob_home"] + out["prob_draw"] + out["prob_away"]
+    for total in totals:
+        assert total == pytest.approx(1.0, abs=1e-6)
+
+
+def test_neural_fit_handles_nan_sample_weight_gracefully():
+    """fit() must handle NaN values in sample_weight column without crashing,
+    replacing them with neutral weight 1.0 and producing valid predictions.
+
+    NaN rows are placed in the TRAIN split (not val) so the guard in train_weights
+    construction is actually exercised. With 120 rows, n_val=12, so train is indices 0-107.
+    We place NaN at indices 50-51, which lands in train and triggers the guard.
+    """
+    results = make_results(120)
+    # Create sample_weight with NaN in the TRAIN split (indices 50-51)
+    weights = [1.0] * 120
+    weights[50] = float("nan")
+    weights[51] = float("nan")
+    results["sample_weight"] = weights
+    model = _small_model()
+    # Should not raise despite NaN values
+    model.fit(results)
+
+    # Model should still produce valid predictions
+    out = model.predict_batch(results.head(5))
+    totals = out["prob_home"] + out["prob_draw"] + out["prob_away"]
+    for i, total in enumerate(totals):
+        assert total == pytest.approx(1.0, abs=1e-6), f"Row {i}: market sum = {total}"

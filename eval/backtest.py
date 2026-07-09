@@ -12,6 +12,8 @@ VAL_DURATION_MONTHS: int = 6
 STEP_MONTHS: int = 6
 KELLY_FRACTION: float = 0.25
 MIN_EDGE: float = 0.02
+MIN_MARKET_PROB: float = 0.08
+MIN_RELATIVE_EDGE: float = 0.20
 
 
 @dataclass
@@ -59,9 +61,63 @@ def generate_folds(
     return folds
 
 
+def select_value_bet(
+    prob_home: float,
+    prob_draw: float,
+    prob_away: float,
+    market_home: float,
+    market_draw: float,
+    market_away: float,
+    min_edge: float = MIN_EDGE,
+    min_market_prob: float = MIN_MARKET_PROB,
+    min_relative_edge: float = MIN_RELATIVE_EDGE,
+) -> dict:
+    """Return the best-edge outcome for one match and whether it clears all
+    value-bet gates.
+
+    Three gates must ALL pass for is_value to be True:
+      1. best_edge >= min_edge                             (absolute edge, pp)
+      2. best_market_prob >= min_market_prob                (favorite-longshot floor)
+      3. best_edge / best_market_prob >= min_relative_edge  (relative edge)
+
+    The floor and relative-edge gates exist because the favorite-longshot
+    bias means bookmakers already price longshots ABOVE their true
+    probability — a model claiming e.g. 9% against a 6% market price is much
+    more likely to be uncalibrated at the tail than to have found real value.
+    A flat probability-point edge treats that case identically to a
+    well-supported 42%-vs-39% edge, which is the wrong shape of test.
+
+    NaN market probabilities (no odds available) always yield is_value=False.
+    """
+    edges = {
+        "home": prob_home - market_home,
+        "draw": prob_draw - market_draw,
+        "away": prob_away - market_away,
+    }
+    markets = {"home": market_home, "draw": market_draw, "away": market_away}
+
+    best_outcome = max(edges, key=lambda k: edges[k])
+    best_edge = edges[best_outcome]
+    best_market_prob = markets[best_outcome]
+
+    passes_abs = best_edge >= min_edge
+    passes_floor = best_market_prob >= min_market_prob
+    passes_relative = best_market_prob > 0 and (best_edge / best_market_prob) >= min_relative_edge
+    is_value = bool(passes_abs and passes_floor and passes_relative)
+
+    return {
+        "best_outcome": best_outcome,
+        "best_edge": best_edge,
+        "best_market_prob": best_market_prob,
+        "is_value": is_value,
+    }
+
+
 def compute_value_bets(
     predictions: pd.DataFrame,
     min_edge: float = MIN_EDGE,
+    min_market_prob: float = MIN_MARKET_PROB,
+    min_relative_edge: float = MIN_RELATIVE_EDGE,
 ) -> pd.DataFrame:
     """Filter predictions to value bets and compute staking columns.
 
@@ -72,17 +128,35 @@ def compute_value_bets(
 
     Adds columns:
         margin_home, margin_draw, margin_away
-        edge_home, edge_draw, edge_away
         best_edge_outcome (str: "home"/"draw"/"away")
         best_edge (float)
+        best_market_prob (float)
         kelly_stake (float)
         outcome_won (bool)
         flat_return (float)
         kelly_return (float)
 
-    Returns only rows where best_edge >= min_edge.
+    Returns only rows where select_value_bet() flags is_value=True — i.e.
+    where the absolute edge, market-probability floor, and relative-edge
+    gates all pass. See select_value_bet() docstring for why a flat
+    probability-point edge alone is insufficient.
     """
     df = predictions.copy()
+
+    # Guard against empty DataFrame: return early with all expected columns.
+    if df.empty:
+        df["margin_home"] = pd.Series(dtype="float64")
+        df["margin_draw"] = pd.Series(dtype="float64")
+        df["margin_away"] = pd.Series(dtype="float64")
+        df["best_edge_outcome"] = pd.Series(dtype="object")
+        df["best_edge"] = pd.Series(dtype="float64")
+        df["best_market_prob"] = pd.Series(dtype="float64")
+        df["is_value"] = pd.Series(dtype="bool")
+        df["kelly_stake"] = pd.Series(dtype="float64")
+        df["outcome_won"] = pd.Series(dtype="bool")
+        df["flat_return"] = pd.Series(dtype="float64")
+        df["kelly_return"] = pd.Series(dtype="float64")
+        return df
 
     has_odds = all(c in df.columns for c in ("odds_home", "odds_draw", "odds_away"))
 
@@ -106,17 +180,27 @@ def compute_value_bets(
         df["margin_draw"] = np.nan
         df["margin_away"] = np.nan
 
-    df["edge_home"] = df["prob_home"] - df["margin_home"]
-    df["edge_draw"] = df["prob_draw"] - df["margin_draw"]
-    df["edge_away"] = df["prob_away"] - df["margin_away"]
+    selections = df.apply(
+        lambda row: select_value_bet(
+            row["prob_home"],
+            row["prob_draw"],
+            row["prob_away"],
+            row["margin_home"],
+            row["margin_draw"],
+            row["margin_away"],
+            min_edge=min_edge,
+            min_market_prob=min_market_prob,
+            min_relative_edge=min_relative_edge,
+        ),
+        axis=1,
+        result_type="expand",
+    )
+    df["best_edge_outcome"] = selections["best_outcome"]
+    df["best_edge"] = selections["best_edge"]
+    df["best_market_prob"] = selections["best_market_prob"]
+    df["is_value"] = selections["is_value"]
 
-    edges = df[["edge_home", "edge_draw", "edge_away"]].values
-    best_idx = np.argmax(edges, axis=1)
-    outcome_names = np.array(["home", "draw", "away"])
-    df["best_edge_outcome"] = outcome_names[best_idx]
-    df["best_edge"] = edges[np.arange(len(df)), best_idx]
-
-    df = df[df["best_edge"] >= min_edge].copy()
+    df = df[df["is_value"]].copy()
 
     if has_odds and len(df) > 0:
         odds_map = {"home": "odds_home", "draw": "odds_draw", "away": "odds_away"}

@@ -21,7 +21,14 @@ TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID: str = os.environ["TELEGRAM_CHAT_ID"]
 ADVANCE_MINUTES: int = int(os.getenv("ADVANCE_MINUTES", "60"))
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
-WC2026_CMD: list[str] = ["wc2026", "--next", "--show-all", "--telegram"]
+WC2026_CMD: list[str] = [
+    "wc2026",
+    "--next",
+    "--show-all",
+    "--telegram",
+    "--checkpoint",
+    "checkpoints/neural_v2_quarterfinal.pt",
+]
 
 logging.basicConfig(
     level=logging.INFO,

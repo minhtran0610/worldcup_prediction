@@ -165,10 +165,10 @@ def _format_telegram_match(
     parts: list[str] = []
     parts.append(f"⚽ <b>{home} vs {away}</b>  ·  {_ko_str(kickoff)} UTC")
 
-    # Form
+    # 1. Pre-match sentiment (always-fresh RSS read, single most-recent match)
     if fa_home is not None or fa_away is not None:
         parts.append("")
-        parts.append("<b>📰 Form</b>")
+        parts.append("<b>📰 1. Sentiment Analysis</b>")
         for team, fa in ((home, fa_home), (away, fa_away)):
             if fa is None:
                 parts.append(f"⬜ <b>{team}</b>  no data")
@@ -184,10 +184,10 @@ def _format_telegram_match(
             )
             parts.append(f"    {ctx}")
 
-    # Trajectory (multi-match WC2026 form arc, requires GUARDIAN_API_KEY)
+    # 2. Multi-match WC2026 trajectory (Guardian archive, requires GUARDIAN_API_KEY)
     if ta_home is not None or ta_away is not None:
         parts.append("")
-        parts.append("<b>🧭 Trajectory</b>")
+        parts.append("<b>🧭 2. Form Trajectory</b>")
         for team, ta in ((home, ta_home), (away, ta_away)):
             if ta is None:
                 parts.append(f"⬜ <b>{team}</b>  no data")

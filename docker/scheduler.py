@@ -20,14 +20,15 @@ from apscheduler.triggers.date import DateTrigger
 TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID: str = os.environ["TELEGRAM_CHAT_ID"]
 ADVANCE_MINUTES: int = int(os.getenv("ADVANCE_MINUTES", "60"))
-OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
+OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://ollama:11434")
+CHECKPOINT_PATH: str = os.getenv("CHECKPOINT_PATH", "checkpoints/neural_v2.pt")
 WC2026_CMD: list[str] = [
     "wc2026",
     "--next",
     "--show-all",
     "--telegram",
     "--checkpoint",
-    "checkpoints/neural_v2_quarterfinal.pt",
+    CHECKPOINT_PATH,
 ]
 
 logging.basicConfig(

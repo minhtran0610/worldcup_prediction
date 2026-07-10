@@ -1,22 +1,52 @@
 services:
+  ollama:
+    image: ollama/ollama
+    volumes:
+      # Model weights (gemma4:e4b, qwen3.5:9b, ...) persist here across restarts/migrations
+      - ollama_models:/root/.ollama
+    gpus: all
+    restart: unless-stopped
+
   scheduler:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     volumes:
-      # Trained checkpoint (read-only — training stays on bare metal)
-      - ../checkpoints:/app/checkpoints:ro
-      # Data cache shared with the host (schedule, odds snapshot, form log)
-      - ../data:/app/data
+      # Shared with trainer: trainer writes, scheduler only ever reads.
+      - checkpoints:/app/checkpoints
+      - training_data:/app/data/raw:ro
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       THE_ODDS_API_KEY: ${THE_ODDS_API_KEY}
       GUARDIAN_API_KEY: ${GUARDIAN_API_KEY}
-      # Point at the host's Ollama instance; host.docker.internal resolves via extra_hosts below
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      API_FOOTBALL_KEY: ${API_FOOTBALL_KEY}
+      # Ollama is now a sibling container reachable by service name on the compose network
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
       ADVANCE_MINUTES: ${ADVANCE_MINUTES:-60}
-    # Allows host.docker.internal to resolve on Linux (no-op on Mac/Windows)
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # Stable pointer name the trainer service promotes into after every retrain
+      CHECKPOINT_PATH: ${CHECKPOINT_PATH:-checkpoints/neural_v2.pt}
+    depends_on:
+      - ollama
     restart: unless-stopped
+
+  trainer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.trainer
+    # Never starts on a plain `docker compose up` — invoke explicitly:
+    #   docker compose run --rm trainer
+    #   docker compose run --rm trainer --csv-path /path/to/results.csv   (first run on a fresh volume)
+    profiles: ["trainer"]
+    volumes:
+      # Read-write: this is the only service that writes checkpoints/ and data/raw/.
+      - checkpoints:/app/checkpoints
+      - training_data:/app/data/raw
+    environment:
+      CHECKPOINT_PATH: ${CHECKPOINT_PATH:-checkpoints/neural_v2.pt}
+    gpus: all
+
+volumes:
+  ollama_models:
+  checkpoints:
+  training_data:

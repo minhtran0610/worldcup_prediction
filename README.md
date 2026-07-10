@@ -92,12 +92,15 @@ worldcup_prediction/
     export.py             # CSV export
 
   docker/
-    Dockerfile            # CPU-only Python 3.13 image
-    docker-compose.yml    # Scheduler service definition
+    Dockerfile            # CPU-only scheduler image
+    Dockerfile.trainer    # GPU (CUDA) trainer image
+    entrypoint-trainer.sh # Backs up the live checkpoint, then runs `train`
+    docker-compose.yml    # ollama + scheduler + trainer service definitions
     scheduler.py          # APScheduler-based pre-match Telegram bot
 
   checkpoints/
-    neural.pt             # Saved NeuralModel checkpoint
+    neural.pt             # Legacy single-model checkpoint
+    neural_v2.pt           # Stable pointer name — what scheduler/trainer both read/write
 
   pyproject.toml
 ```
@@ -536,41 +539,86 @@ export --output predictions.csv
 
 ---
 
-## Docker Scheduler and Telegram Bot
+## Docker: Scheduler, Trainer, and Ollama
 
-The scheduler runs inside a Docker container and fires the `wc2026` prediction command automatically before each match, sending the result to a Telegram chat.
+Everything runs as containers: a `scheduler` service (fires predictions to Telegram), an `ollama` service (LLM form signal), and an on-demand `trainer` service (retrains the neural model). One `docker-compose.yml` wires them together, so the whole stack — code, checkpoint, and Ollama models — migrates to another machine by pulling images and bringing up the same compose file, no host-level setup beyond Docker + the NVIDIA Container Toolkit (for GPU passthrough).
 
-### How it works
+### Services
 
-`docker/scheduler.py` uses APScheduler to manage a job queue:
+**`ollama`** — the official `ollama/ollama` image, unmodified. Model weights persist in the `ollama_models` named volume. GPU passthrough via `gpus: all`. On a fresh volume, pull the models once: `docker compose exec ollama ollama pull qwen3.5:9b`.
 
-1. **On startup:** loads the WC 2026 schedule, registers a `DateTrigger` job per upcoming match, firing `ADVANCE_MINUTES` (default 60) before kickoff.
-2. **Daily at 02:00 UTC:** refreshes the schedule to pick up any FIFA rescheduling.
-3. **At each firing:** runs `wc2026 --next --show-all --telegram` as a subprocess, captures the stdout, and sends it to Telegram via the Bot API, splitting at the 4096-character limit.
+**`scheduler`** — CPU-only, always-on (`restart: unless-stopped`). Same job as before: APScheduler fires `wc2026 --next --show-all --telegram` before each kickoff and posts the result to Telegram. Reaches Ollama over the compose network at `http://ollama:11434` (no more `host.docker.internal`). Reads the neural checkpoint from the shared `checkpoints` volume and historical results/squad data (read-only) from the shared `training_data` volume — it never writes to either.
 
-The neural model checkpoint and data cache are mounted from the host as Docker volumes. GPU inference stays on the host; the container runs CPU-only PyTorch.
-
-### Build and run
+**`trainer`** — GPU, on-demand only (`profiles: ["trainer"]`, so it never starts on a plain `docker compose up`). Retrains the neural model and promotes the result into production. Invoked manually after each World Cup round:
 
 ```bash
-# Copy .env with required tokens (see Environment Variables)
-cp .env.example .env
-
-# Build and start
-cd docker
-docker compose up -d
-
-# View logs
-docker compose logs -f scheduler
+docker compose run --rm trainer
 ```
 
-### Dockerfile summary
+This runs `train --checkpoint checkpoints/neural_v2.pt --no-holdout` inside the container — the same production-refit recipe described in [Training](#training) (holdout run for Val RPS, then refit on all data including newly-completed WC2026 matches). The entrypoint backs up the existing checkpoint to `neural_v2.pt.bak` before writing the new one — promotion is unconditional (no automatic RPS gate), so that backup is the rollback path if a run goes bad: `docker compose run --rm trainer cp checkpoints/neural_v2.pt.bak checkpoints/neural_v2.pt`. Because `checkpoints/neural_v2.pt` is a shared volume (not baked into an image), the `scheduler` container picks up the new checkpoint on its very next prediction — no rebuild, no restart.
 
-- Base: `python:3.13-slim`
-- CPU-only PyTorch installed first from the PyTorch CPU wheel index.
-- APScheduler and requests added for scheduler-specific dependencies.
-- Project installed as an editable package (`pip install -e .`).
-- Entrypoint: `python docker/scheduler.py`
+`scheduler` and `trainer` both default to the same stable checkpoint filename via `CHECKPOINT_PATH` (`checkpoints/neural_v2.pt`) — this is what makes handoff between them automatic.
+
+### Volumes
+
+| Volume | Written by | Read by | Contents |
+|--------|-----------|---------|----------|
+| `checkpoints` | `trainer` | `scheduler` | Neural model checkpoint(s) |
+| `training_data` | `trainer` | `scheduler` (read-only) | `data/raw/` — Kaggle results cache, squad registries |
+| `ollama_models` | `ollama` | `ollama` | Downloaded LLM weights |
+
+`data/cache/` (odds snapshots, LLM form log, schedule cache) is deliberately **not** a volume — it's disposable and rebuilds inside the `scheduler` container's own writable layer on every run.
+
+### Bootstrapping a fresh volume
+
+**Named volumes start empty — they do NOT inherit host directory content the way the old bind mounts did.** This bit us once already: switching this repo's own scheduler over to the new compose file left `checkpoints` and `training_data` empty even though `checkpoints/` and `data/raw/` were populated on the host, and the container ran for a while before anyone noticed predictions would fail at the next fire. Always seed the volumes as part of cutover, not after.
+
+**If you already have populated `checkpoints/` and `data/raw/` on the host** (e.g. cutting this same machine over to Docker, or copying from another checkout), seed the volumes directly before (or right after) `docker compose up -d`:
+
+```bash
+docker run --rm -v "$(pwd)/../data/raw:/src:ro" -v docker_training_data:/dst alpine cp -a /src/. /dst/
+docker run --rm -v "$(pwd)/../checkpoints:/src:ro" -v docker_checkpoints:/dst alpine cp -a /src/. /dst/
+```
+
+(Volume names are prefixed with the Compose project name — `docker_` by default, i.e. the `docker/` directory name; check with `docker volume ls` if it was built from a differently-named directory or `-p` override.)
+
+**On a genuinely fresh machine with no prior host data**, squad registries self-bootstrap via a Wikipedia scrape on first use, but the core match-history cache requires the Kaggle CSV explicitly, since there's no automated Kaggle fetch:
+
+```bash
+docker compose run --rm -v /path/to/results.csv:/tmp/results.csv trainer --csv-path /tmp/results.csv
+```
+
+After either path, `data/raw/results.parquet` is cached in the volume and subsequent `docker compose run --rm trainer` calls need no `--csv-path`.
+
+### Build, run, and migrate
+
+```bash
+# Local build and start (scheduler + ollama; trainer stays dormant)
+cp docker/.env.example docker/.env   # fill in tokens — see Environment Variables
+cd docker
+docker compose up -d
+docker compose exec ollama ollama pull qwen3.5:9b   # one-time, per ollama_models volume
+
+# Migrate to another server: push the custom images, pull them there
+docker compose build scheduler trainer
+docker tag docker-scheduler ghcr.io/<you>/worldcup-scheduler:latest
+docker tag docker-trainer   ghcr.io/<you>/worldcup-trainer:latest
+docker push ghcr.io/<you>/worldcup-scheduler:latest
+docker push ghcr.io/<you>/worldcup-trainer:latest
+
+# On the target machine (needs Docker + NVIDIA Container Toolkit):
+docker login ghcr.io
+# copy docker-compose.yml and .env over separately — never bake .env into an image
+docker compose pull
+docker compose up -d
+# then bootstrap training_data as above, and run trainer once to produce a checkpoint
+```
+
+### View logs
+
+```bash
+docker compose logs -f scheduler
+```
 
 ---
 
@@ -582,8 +630,9 @@ docker compose logs -f scheduler
 | `TELEGRAM_CHAT_ID` | Yes (scheduler) | Target chat or channel ID |
 | `THE_ODDS_API_KEY` | Optional | the-odds-api.com key; enables live odds display |
 | `API_FOOTBALL_KEY` | Optional | API-Football key; enables injury data and schedule |
-| `OLLAMA_HOST` | Optional | Ollama base URL (default: `http://localhost:11434`) |
+| `OLLAMA_HOST` | Optional | Ollama base URL (default: `http://localhost:11434` bare-metal, `http://ollama:11434` in Docker) |
 | `ADVANCE_MINUTES` | Optional | Minutes before kickoff to fire prediction (default: 60) |
+| `CHECKPOINT_PATH` | Optional | Neural checkpoint path shared by `scheduler`/`trainer` in Docker (default: `checkpoints/neural_v2.pt`) |
 
 ---
 

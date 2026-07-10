@@ -1,0 +1,28 @@
+FROM python:3.13-slim
+
+# Use host network during build so pip can reach PyPI/PyTorch without DNS issues
+ARG BUILDKIT_NETWORK=host
+
+WORKDIR /app
+
+# GPU-enabled PyTorch (default PyPI wheel ships CUDA support) — unlike the scheduler
+# image, the trainer actually needs the RTX GPU, so no CPU-only index-url here.
+RUN pip install --no-cache-dir torch
+
+# Project dependencies (torch already installed above, --no-deps skips reinstall)
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir \
+    pandas scipy scikit-learn lightgbm xgboost typer rich matplotlib \
+    soccerdata pyarrow
+
+# Copy source and install package without re-resolving deps
+COPY . .
+RUN pip install --no-cache-dir --no-deps -e .
+
+COPY docker/entrypoint-trainer.sh /usr/local/bin/entrypoint-trainer.sh
+RUN chmod +x /usr/local/bin/entrypoint-trainer.sh
+
+# checkpoints/ and data/raw/ are mounted as volumes at runtime (see docker-compose.yml) —
+# both are empty in the image itself.
+ENTRYPOINT ["/usr/local/bin/entrypoint-trainer.sh"]
+CMD ["--no-holdout"]

@@ -1,0 +1,28 @@
+# Build context excludes for both docker/Dockerfile and docker/Dockerfile.trainer.
+# checkpoints/ and data/raw/ are runtime volumes now, not baked into any image —
+# excluding them keeps images lean and guarantees no local state/secrets leak into layers.
+
+.git
+.gitignore
+.github
+
+**/__pycache__
+*.pyc
+*.pyo
+.venv
+.pytest_cache
+.ruff_cache
+*.egg-info
+dist
+build
+
+checkpoints
+data/raw
+data/cache
+
+docker/.env
+.env
+**/.env
+
+.claude
+.worktrees

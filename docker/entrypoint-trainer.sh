@@ -8,8 +8,8 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:-checkpoints/neural_v2.pt}"
 
 if [ -f "$CHECKPOINT_PATH" ]; then
     cp "$CHECKPOINT_PATH" "${CHECKPOINT_PATH}.bak"
-    echo "[entrypoint-trainer] Backed up existing checkpoint to ${CHECKPOINT_PATH}.bak"
+    echo "[entrypoint-trainer] Backed up existing checkpoint to $(readlink -f "${CHECKPOINT_PATH}.bak")"
 fi
 
-echo "[entrypoint-trainer] Running: train --checkpoint ${CHECKPOINT_PATH} $*"
+echo "[entrypoint-trainer] Running: train --checkpoint $(readlink -f "$CHECKPOINT_PATH") $*"
 exec train --checkpoint "$CHECKPOINT_PATH" "$@"

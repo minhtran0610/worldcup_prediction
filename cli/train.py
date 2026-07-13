@@ -146,7 +146,7 @@ def main(
         final = NeuralModel(n_epochs=best_epoch, lr=lr, checkpoint_path=str(checkpoint))
         final.fit(train_results=results, early_stopping=False)
         final.save(checkpoint)
-        typer.echo(f"Production checkpoint (all data) saved to {checkpoint}")
+        typer.echo(f"Production checkpoint (all data) saved to {checkpoint.resolve()}")
     else:
         model.save(checkpoint)
-        typer.echo(f"Checkpoint saved to {checkpoint}")
+        typer.echo(f"Checkpoint saved to {checkpoint.resolve()}")

@@ -4,6 +4,10 @@ services:
     volumes:
       # Model weights (gemma4:e4b, qwen3.5:9b, ...) persist here across restarts/migrations
       - ollama_models:/root/.ollama
+    ports:
+      # Published to the host — this is now the only Ollama instance on the box
+      # (native systemd install retired in favor of this container).
+      - "11434:11434"
     gpus: all
     restart: unless-stopped
 

@@ -10,6 +10,13 @@ services:
       - "11434:11434"
     gpus: all
     restart: unless-stopped
+    environment:
+      # Ollama silently caps context at a small default (observed 4096) unless
+      # set explicitly. worldcup_prediction always passes its own num_ctx per
+      # request (see data/ingest/llm_form.py), which overrides this regardless
+      # of value — this only raises the default for other clients on this box
+      # (jarvis/OpenCode) that do not set num_ctx themselves.
+      OLLAMA_CONTEXT_LENGTH: "131072"
 
   scheduler:
     build:

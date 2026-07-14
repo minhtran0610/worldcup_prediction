@@ -10,8 +10,9 @@ Pipeline per team
 -----------------
 1. Fetch RSS feeds (BBC WC, BBC Sport, Guardian WC)  (one HTTP call each, shared)
 2. Filter items by team name keywords in title + description
-3. Fetch full article body for matched items  (parallel HTTP)
-4. Concatenate + truncate to 2500 chars
+3. Fetch full article body for matched items  (parallel HTTP, each capped at
+   _MAX_COMBINED_CHARS)
+4. Concatenate (no further truncation — num_ctx is sized to fit)
 5. POST to Ollama /api/chat with extraction prompt
 6. Parse + validate JSON → FormAnalysis
 
@@ -481,7 +482,10 @@ _TRAJECTORY_NUM_PREDICT = 600
 # ceiling, and a naive join-then-slice was silently dropping whichever
 # matches didn't fit — e.g. a 5-match trajectory where the first two
 # matches' articles alone exceeded the cap, so the model never saw the last
-# three matches (including a 3-0 win) at all.
+# three matches (including a 3-0 win) at all. The single-match sentiment
+# path's combined-articles slice had the same bug (fewer articles, but still
+# capable of dropping later ones once several per team exceeded the cap) —
+# removed there too.
 #
 # Empirically tested on this project's RTX 4070 Ti Super (16GB VRAM) via
 # `ollama ps` + `nvidia-smi` while loading qwen3.5:9b (Q4_K_M):
@@ -495,12 +499,13 @@ _TRAJECTORY_NUM_PREDICT = 600
 # case while still running 100% on GPU. The per-match/combined character
 # truncation this replaced is removed entirely — num_ctx is now the real,
 # properly-sized boundary instead of an arbitrary undersized guess.
-_TRAJECTORY_NUM_CTX = 131072
-
-# The single-match sentiment path's input is much smaller (one match's
-# articles, already capped at _MAX_COMBINED_CHARS=8000 chars each), but set
-# explicitly rather than relying on Ollama's undocumented-in-code default.
-_SENTIMENT_NUM_CTX = 8192
+#
+# Shared by both the trajectory and single-match sentiment paths rather than
+# giving sentiment its own smaller value: Ollama keys its loaded model
+# instance by (model, options), so a differing num_ctx between the two call
+# sites forces a model reload every time the pipeline alternates between
+# them. One shared value keeps a single instance loaded for both.
+_NUM_CTX = 131072
 
 _SYSTEM_PROMPT_TRAJECTORY = (
     "You are a football analyst extracting a team's CURRENT performance trajectory from a "
@@ -584,7 +589,7 @@ def _call_ollama(
     user_content: str,
     model: str,
     num_predict: int = 400,
-    num_ctx: int = _SENTIMENT_NUM_CTX,
+    num_ctx: int = _NUM_CTX,
 ) -> dict:
     """POST extraction request to Ollama. Returns parsed JSON dict.
 
@@ -698,10 +703,20 @@ def analyse_team_form(
     if not texts:
         return FormAnalysis.neutral(team)
 
-    combined = "\n\n---\n\n".join(texts)[:_MAX_COMBINED_CHARS]
+    # No character truncation on the joined whole — see the _NUM_CTX comment.
+    # Each article is already capped at _MAX_COMBINED_CHARS chars individually
+    # (in _fetch_article_text / fetch_team_match_report), so this only joins
+    # already-bounded pieces instead of re-slicing across all of them and
+    # risking silently dropping later articles the way the old cap did.
+    combined = "\n\n---\n\n".join(texts)
 
     try:
-        raw = _call_ollama(_SYSTEM_PROMPT, _USER_TEMPLATE.format(team=team, text=combined), model)
+        raw = _call_ollama(
+            _SYSTEM_PROMPT,
+            _USER_TEMPLATE.format(team=team, text=combined),
+            model,
+            num_ctx=_NUM_CTX,
+        )
     except ConnectionError as exc:
         print(f"[llm_form] Ollama unavailable: {exc}", file=sys.stderr)
         return FormAnalysis.neutral(team, str(exc))
@@ -744,10 +759,10 @@ def analyse_team_trajectory(
     if not match_blocks:
         return FormAnalysis.neutral(team)
 
-    # No character truncation here — num_ctx=_TRAJECTORY_NUM_CTX (see comment
-    # above the constant) is sized to comfortably fit every match's full
-    # article text, so there's no need to cut anything and risk silently
-    # dropping a match the way the old char-cap-on-the-joined-whole did.
+    # No character truncation here — num_ctx=_NUM_CTX (see comment above the
+    # constant) is sized to comfortably fit every match's full article text,
+    # so there's no need to cut anything and risk silently dropping a match
+    # the way the old char-cap-on-the-joined-whole did.
     combined = "\n\n---\n\n".join(match_blocks)
 
     try:
@@ -756,7 +771,7 @@ def analyse_team_trajectory(
             _USER_TEMPLATE_TRAJECTORY.format(team=team, text=combined),
             model,
             num_predict=_TRAJECTORY_NUM_PREDICT,
-            num_ctx=_TRAJECTORY_NUM_CTX,
+            num_ctx=_NUM_CTX,
         )
     except ConnectionError as exc:
         print(f"[llm_form] Ollama unavailable: {exc}", file=sys.stderr)

@@ -148,8 +148,8 @@ def test_analyse_team_trajectory_sends_ordered_blocks_and_trajectory_prompt(monk
     assert captured["num_predict"] == llm_form._TRAJECTORY_NUM_PREDICT
     assert captured["num_predict"] > 400
     # Large enough context window to fit every match's full article text —
-    # see _TRAJECTORY_NUM_CTX for the empirical GPU-memory reasoning.
-    assert captured["num_ctx"] == llm_form._TRAJECTORY_NUM_CTX
+    # see _NUM_CTX for the empirical GPU-memory reasoning.
+    assert captured["num_ctx"] == llm_form._NUM_CTX
 
 
 def test_analyse_team_trajectory_does_not_truncate_later_matches(monkeypatch):
@@ -189,3 +189,43 @@ def test_analyse_team_trajectory_does_not_truncate_later_matches(monkeypatch):
     assert "Match 2 of 3" in captured["user_content"]
     assert "Match 3 of 3" in captured["user_content"]
     assert "Dominant win over Canada" in captured["user_content"]
+
+
+def test_analyse_team_form_does_not_truncate_later_articles(monkeypatch):
+    """Same class of bug as the trajectory regression above, but for the
+    single-match sentiment path: joining several teams' articles and then
+    slicing the combined text to _MAX_COMBINED_CHARS could silently drop
+    later articles once earlier ones alone exceeded the cap.
+    """
+    captured = {}
+
+    def fake_call_ollama(system_prompt, user_content, model, num_predict=400, num_ctx=8192):
+        captured["user_content"] = user_content
+        captured["num_ctx"] = num_ctx
+        return {
+            "form_score": 0.2,
+            "performance_context": "ok",
+            "key_absences": [],
+            "morale_signals": [],
+            "tactical_notes": "",
+            "confidence": 0.5,
+        }
+
+    monkeypatch.setattr(llm_form, "_call_ollama", fake_call_ollama)
+
+    # Each article is already at the per-article cap (_MAX_COMBINED_CHARS),
+    # so several of them combined would have exceeded the old combined cap.
+    huge_article = "Dense match report text. " * 1000  # ~26,000 chars
+    texts = [
+        f"ARTICLE-ONE {huge_article}",
+        f"ARTICLE-TWO {huge_article}",
+        "ARTICLE-THREE Distinctly-labeled final article.",
+    ]
+
+    llm_form.analyse_team_form("Morocco", texts)
+
+    assert "ARTICLE-ONE" in captured["user_content"]
+    assert "ARTICLE-TWO" in captured["user_content"]
+    assert "ARTICLE-THREE" in captured["user_content"]
+    assert "Distinctly-labeled final article" in captured["user_content"]
+    assert captured["num_ctx"] == llm_form._NUM_CTX

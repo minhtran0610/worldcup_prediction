@@ -817,7 +817,10 @@ def main(
     form_analyses: dict = {}
 
     if llm_form:
-        match_pairs = [(row.home_team, row.away_team) for row in upcoming.itertuples(index=False)]
+        match_pairs = [
+            (row.home_team, row.away_team, getattr(row, "stage", None))
+            for row in upcoming.itertuples(index=False)
+        ]
         typer.echo(
             f"Running LLM form analysis ({llm_model}) for {len(match_pairs)} match(es)"
             " — this may take a few minutes...",

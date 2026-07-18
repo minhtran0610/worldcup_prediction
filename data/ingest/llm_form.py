@@ -50,7 +50,9 @@ import pandas as pd
 from data.ingest import guardian_api
 
 _OLLAMA_BASE = _os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-_OLLAMA_TIMEOUT = 45  # seconds — allow for cold model load
+_OLLAMA_TIMEOUT = 120  # seconds — allow for cold model load (observed 42.8s generation
+# alone even with a warm prompt cache; per-match firings are hours apart, so the model
+# is routinely evicted from VRAM between calls and pays a full reload on top of that)
 _BBC_WC_RSS = "https://feeds.bbci.co.uk/sport/football/world-cup/rss.xml"
 _BBC_SPORT_RSS = "https://feeds.bbci.co.uk/sport/football/rss.xml"
 _GUARDIAN_WC_RSS = "https://www.theguardian.com/football/world-cup-2026/rss"
@@ -426,14 +428,32 @@ _SYSTEM_PROMPT = (
     "Past absences that have ended are NOT absences.\n\n"
     "RULES:\n"
     "1. Only use information EXPLICITLY stated in the text — no external knowledge.\n"
-    "2. performance_context: ALWAYS fill this. Summarise what the articles say about this "
+    "2. Round names are precise, do not blur them: a team only played 'the final' if that "
+    "match decided the tournament champion. A semi-final loser did NOT play 'in the final' "
+    "— they lost the semi-final and now play the third-place / bronze medal match. Sports "
+    "journalism often nicknames the third-place game 'the final' or 'the bronze final' in "
+    "headlines — do not let that nickname make you call an actual semi-final result 'the "
+    "final'. If text is ambiguous about which round a result belongs to, describe the result "
+    "without naming the round rather than guessing.\n"
+    "3. key_absences entries are bare player names ONLY — never append parentheticals, "
+    "performance commentary, or fitness caveats to a name (e.g. write 'Player X', not "
+    "'Player X (fit again but underperforming)'). If a player's absence status carries "
+    "nuance worth capturing, put that nuance in performance_context instead, and only add "
+    "the name to key_absences if they are cleanly confirmed absent.\n"
+    "4. performance_context: ALWAYS fill this. Summarise what the articles say about this "
     "team's form and momentum. If genuinely nothing is said, explain what the articles "
     "covered instead.\n"
-    "3. form_score [-1, 1]: overall momentum signal. Positive = playing well / rising / "
+    "5. form_score [-1, 1]: overall momentum signal. Positive = playing well / rising / "
     "confident. Negative = struggling / unsettled / weakened. 0 = nothing to go on.\n"
-    "4. confidence [0, 1]: how much evidence you have. 0 = team barely mentioned. "
-    "0.5 = some signal. 0.9+ = multiple clear statements about form and momentum.\n"
-    "5. Output valid JSON only — no markdown, no text outside the JSON object."
+    "6. confidence [0, 1]: driven primarily by SOURCE COUNT, not how decisively any single "
+    "source is worded — one forcefully-worded article is still one data point. 0 = team "
+    "barely mentioned. 0.15-0.35 = one article with a clear but singular statement. "
+    "0.4-0.6 = one detailed article, or two loosely agreeing. 0.65-0.8 = two to three "
+    "articles independently corroborating the same direction. 0.85-1.0 = reserved for four "
+    "or more corroborating articles, or a detailed match report independently confirmed "
+    "elsewhere. Most inputs should land in the middle of this range — treat 0.9+ as rare, "
+    "not a default for 'the article sounded confident.'\n"
+    "7. Output valid JSON only — no markdown, no text outside the JSON object."
 )
 
 _USER_TEMPLATE = (
@@ -441,6 +461,10 @@ _USER_TEMPLATE = (
     "CRITICAL: You are ONLY extracting data for {team}. If the article covers a match between "
     "{team} and an opponent, ignore the opponent entirely — do not list any opponent players "
     "in key_absences, do not score the opponent's morale, do not mix up the two sides.\n\n"
+    "CRITICAL: Get round names right. A semi-final loss is NOT 'the final', even if the text "
+    "nicknames the third-place playoff 'the final' or 'the bronze final' — never repeat that "
+    "nickname as if it were the actual final.\n\n"
+    "{stage_context}"
     "TEXT:\n{text}\n\n"
     "Return JSON with EXACTLY this schema (no extra keys):\n"
     '{{"form_score": <float -1.0 to 1.0: overall narrative sentiment for {team} — '
@@ -448,16 +472,22 @@ _USER_TEMPLATE = (
     '"performance_context": "<string: REQUIRED — 1-3 sentences on {team}\'s current form '
     "narrative (performance quality, momentum, morale, press perception) OR, if no signal, "
     'a brief explanation of what the articles covered and why no form signal could be extracted>", '
-    '"key_absences": [<strings: names of {team} players confirmed absent for their NEXT match — '
-    "never list players from the opposing team>], "
+    '"key_absences": [<strings: BARE player names only, confirmed absent for {team}\'s NEXT '
+    "match — no parentheticals or commentary appended to a name (fitness/performance nuance "
+    "goes in performance_context instead); never list players from the opposing team>], "
     '"morale_signals": [<strings: direct short phrases from text indicating {team} morale or '
     "team atmosphere>], "
     '"tactical_notes": "<string: {team} tactical changes or coach statements, empty if none>", '
     '"confidence": <float 0.0 to 1.0: how strongly the text supports your form_score. '
-    "This value scales how much your judgement moves the prediction, so be calibrated: "
-    "0=team barely mentioned or no clear performance signal; 0.3-0.5=some signal but mixed or "
-    "thin; 0.7-1.0=multiple clear, decisive statements about how the team is playing. "
-    "Reserve high confidence for genuinely strong, well-sourced evidence>}}"
+    "This value scales how much your judgement moves the prediction, so use the full range "
+    "— do not round to the nearest anchor below, use the exact value the evidence justifies. "
+    "Driven primarily by SOURCE COUNT, not how decisively any one source is worded: "
+    "0=team barely mentioned or no clear performance signal; 0.15-0.35=one article with a "
+    "clear but singular statement; 0.4-0.6=one detailed article, or two loosely agreeing; "
+    "0.65-0.8=two to three articles independently corroborating the same direction; "
+    "0.85-1.0=reserved for four or more corroborating articles, or a detailed match report "
+    "independently confirmed elsewhere. Most inputs should land in the middle of this range "
+    "— treat 0.9+ as rare, not a default for 'the article sounded confident.'>}}"
 )
 
 # ── Trajectory prompt (multi-match, chronologically ordered) ──────────────────
@@ -471,8 +501,13 @@ _USER_TEMPLATE = (
 # (2-4 sentences of cross-match narrative vs. 1-3, plus lists potentially
 # aggregated across multiple matches) — the default 400-token budget can cut
 # the JSON off mid-generation on richer inputs, which surfaces as a parse
-# failure rather than a truncation warning.
-_TRAJECTORY_NUM_PREDICT = 600
+# failure rather than a truncation warning. Bumped from 600: a 7-match,
+# heavily-eventful trajectory (e.g. a deep-tournament team) can produce a
+# performance_context alone that eats most of a 600-token budget, leaving the
+# schema's LAST field at risk of truncation — confidence was moved to be the
+# second field for this reason (see _USER_TEMPLATE_TRAJECTORY), but the extra
+# headroom here removes the pressure entirely rather than just relocating it.
+_TRAJECTORY_NUM_PREDICT = 900
 
 # Ollama defaults to a 4096-token context window regardless of what a model
 # architecturally supports, UNLESS num_ctx is set explicitly in the request —
@@ -530,17 +565,33 @@ _SYSTEM_PROMPT_TRAJECTORY = (
     "Past absences that have ended are NOT absences.\n\n"
     "RULES:\n"
     "1. Only use information EXPLICITLY stated in the text — no external knowledge.\n"
-    "2. performance_context: ALWAYS fill this. Summarise the team's trajectory across ALL "
+    "2. Each match block's header (=== Match N of M — vs OPPONENT (date), ROUND, ... ===) "
+    "states the ACTUAL round for that match — trust it completely, it is ground truth. When "
+    "describing a match's round in your output, use the header's round exactly. Never let "
+    "the article prose override it: journalism often nicknames matches loosely (e.g. calling "
+    "the third-place playoff 'the final' or 'the bronze final' in a headline) — those "
+    "nicknames describe a DIFFERENT match than the one in that block's header, so ignore them "
+    "when labeling this block's round.\n"
+    "3. performance_context: ALWAYS fill this. Summarise the team's trajectory across ALL "
     "matches given, not just the most recent one — name the direction (improving/declining/"
     "steady) explicitly in prose. If genuinely nothing is said, explain what the reports "
     "covered instead.\n"
-    "3. form_score [-1, 1]: overall CURRENT momentum, informed by the trajectory across all "
+    "4. form_score [-1, 1]: overall CURRENT momentum, informed by the trajectory across all "
     "matches but weighted toward the most recent. Positive = playing well / rising / "
     "confident. Negative = struggling / unsettled / weakened. 0 = nothing to go on.\n"
-    "4. confidence [0, 1]: how much evidence you have ACROSS ALL matches given. 0 = team "
-    "barely mentioned in any report. 0.5 = some signal in a few reports. 0.9+ = multiple "
-    "clear statements about form and momentum across most/all matches.\n"
-    "5. Output valid JSON only — no markdown, no text outside the JSON object."
+    "5. confidence [0, 1]: driven primarily by how many DISTINCT matches carry usable signal, "
+    "not how decisively any single report is worded, and NOT by whether the trajectory itself "
+    "is steady. A team that swings dominant-shaky-dominant-collapsed across matches can still "
+    "earn top confidence if each swing is clearly documented — confidence measures evidence "
+    "coverage, never narrative tidiness; do not discount it for a volatile or contradictory "
+    "trajectory, that IS the trajectory. 0 = team barely mentioned in any report. 0.15-0.35 = "
+    "one match with a clear but singular statement. 0.4-0.6 = one match covered in detail, or "
+    "two matches with thin/loosely documented signal. 0.65-0.8 = clear, usable signal in two "
+    "to three matches, regardless of whether they agree in direction. 0.85-1.0 = reserved for "
+    "clear, usable signal in four or more matches, regardless of whether the trajectory across "
+    "them is steady or volatile. Most inputs should land in the middle of this range — treat "
+    "0.9+ as rare, not a default for 'the reports sounded confident.'\n"
+    "6. Output valid JSON only — no markdown, no text outside the JSON object."
 )
 
 _USER_TEMPLATE_TRAJECTORY = (
@@ -549,10 +600,29 @@ _USER_TEMPLATE_TRAJECTORY = (
     "CRITICAL: You are ONLY extracting data for {team}. Ignore opponent-specific detail "
     "except as context for {team}'s own performance — do not list opponent players in "
     "key_absences, do not score the opponent's morale.\n\n"
+    "CRITICAL: Each block header below states that match's actual round — use it exactly "
+    "when naming the round, and ignore any different round name or nickname (e.g. 'the "
+    "final', 'the bronze final') that shows up in the article text itself, since that "
+    "nickname likely describes a different match than the one in that block.\n\n"
     "REPORTS (chronological order, earliest match first):\n{text}\n\n"
-    "Return JSON with EXACTLY this schema (no extra keys):\n"
+    "Return JSON with EXACTLY this schema (no extra keys) — form_score and confidence come "
+    "FIRST, before the free-text fields, so they are never at risk of getting cut off if your "
+    "response runs long:\n"
     '{{"form_score": <float -1.0 to 1.0: {team}\'s CURRENT momentum after all matches above, '
     "weighted toward the most recent>, "
+    '"confidence": <float 0.0 to 1.0: how strongly the reports collectively support your '
+    "form_score. Use the full range — do not round to the nearest anchor below, use the "
+    "exact value the evidence justifies. Driven primarily by how many DISTINCT matches carry "
+    "usable signal, not how decisively any single report is worded, and NOT by whether the "
+    "trajectory itself is steady — a team that swings dominant-shaky-dominant-collapsed can "
+    "still earn top confidence if each swing is clearly documented; confidence measures "
+    "evidence coverage, never narrative tidiness. 0=team barely mentioned in any report; "
+    "0.15-0.35=one match with a clear but singular statement; 0.4-0.6=one match covered in "
+    "detail, or two matches with thin/loosely documented signal; 0.65-0.8=clear, usable "
+    "signal in two to three matches, regardless of whether they agree in direction; 0.85-1.0="
+    "reserved for clear, usable signal in four or more matches, regardless of whether the "
+    "trajectory across them is steady or volatile. Most inputs should land in the middle of "
+    "this range — treat 0.9+ as rare, not a default for 'the reports sounded confident.'>, "
     '"performance_context": "<string: REQUIRED — 2-4 sentences describing how {team}\'s form '
     "has evolved across these matches (improving/declining/steady) and why, OR if no signal, "
     'a brief explanation of what the reports covered and why no trajectory could be extracted>", '
@@ -561,11 +631,7 @@ _USER_TEMPLATE_TRAJECTORY = (
     '"morale_signals": [<strings: direct short phrases from the reports indicating {team} '
     "morale or atmosphere, across all matches>], "
     '"tactical_notes": "<string: {team} tactical changes or coach statements across the '
-    'reports, empty if none>", '
-    '"confidence": <float 0.0 to 1.0: how strongly the reports collectively support your '
-    "form_score. 0=team barely mentioned; 0.3-0.5=some signal but thin/mixed across matches; "
-    "0.7-1.0=multiple clear, decisive statements across most matches. Reserve high confidence "
-    "for genuinely strong, well-sourced evidence>}}"
+    'reports, empty if none>"}}'
 )
 
 
@@ -694,8 +760,17 @@ def analyse_team_form(
     texts: list[str],
     urls: list[str] | None = None,
     model: str = DEFAULT_MODEL,
+    stage: str | None = None,
 ) -> FormAnalysis:
     """Extract structured form signals from article texts using Ollama.
+
+    stage, if given, is the team's own upcoming-fixture round (e.g.
+    "Match for third place") from the live schedule — injected as a grounding
+    line so the model doesn't have to guess the CURRENT fixture's round from
+    ambiguous article prose (journalists nickname the third-place playoff
+    "the final" often enough to cause real mislabeling — see
+    data.ingest.trajectory's per-match stage header for the equivalent fix on
+    the trajectory path, which grounds PAST match rounds instead).
 
     Returns FormAnalysis.neutral() immediately if texts is empty (no LLM call).
     Returns neutral FormAnalysis with error set on any Ollama/parse failure.
@@ -710,10 +785,18 @@ def analyse_team_form(
     # risking silently dropping later articles the way the old cap did.
     combined = "\n\n---\n\n".join(texts)
 
+    stage_context = (
+        f"CONTEXT: {team}'s next scheduled match is the {stage}. If the news below "
+        f"describes an upcoming fixture for {team}, that fixture IS the {stage} — do not "
+        f"call it 'the final' or any other round unless {stage!r} is literally 'Final'.\n\n"
+        if stage
+        else ""
+    )
+
     try:
         raw = _call_ollama(
             _SYSTEM_PROMPT,
-            _USER_TEMPLATE.format(team=team, text=combined),
+            _USER_TEMPLATE.format(team=team, text=combined, stage_context=stage_context),
             model,
             num_ctx=_NUM_CTX,
         )
@@ -824,8 +907,13 @@ def get_match_form_analysis(
     away: str,
     model: str = DEFAULT_MODEL,
     max_articles: int = 8,
+    stage: str | None = None,
 ) -> dict[str, FormAnalysis]:
     """Fetch articles for both teams combined, extract signals for each in one LLM call.
+
+    stage, if given, is this fixture's own round (e.g. "Match for third place") —
+    both teams share it, since it's the same match. See analyse_team_form for why
+    this grounding matters.
 
     Returns {home: FormAnalysis, away: FormAnalysis}.
     A match preview article contributes signal to both sides simultaneously.
@@ -847,8 +935,8 @@ def get_match_form_analysis(
         f"{away}: {len(away_texts)} article(s) → running {model}...",
         file=sys.stderr,
     )
-    home_fa = analyse_team_form(home, home_texts, urls=home_urls, model=model)
-    away_fa = analyse_team_form(away, away_texts, urls=away_urls, model=model)
+    home_fa = analyse_team_form(home, home_texts, urls=home_urls, model=model, stage=stage)
+    away_fa = analyse_team_form(away, away_texts, urls=away_urls, model=model, stage=stage)
     return {home: home_fa, away: away_fa}
 
 
@@ -865,16 +953,19 @@ def get_all_teams_form(
 
 
 def get_all_matches_form(
-    match_pairs: list[tuple[str, str]],
+    match_pairs: list[tuple[str, str, str | None]],
     model: str = DEFAULT_MODEL,
 ) -> dict[str, FormAnalysis]:
-    """Run combined match-level form analysis for a list of (home, away) pairs.
+    """Run combined match-level form analysis for a list of (home, away, stage) triples.
 
-    Each pair is one LLM call reading articles for both teams simultaneously.
+    stage is that fixture's own round (e.g. "Match for third place"), or None if
+    unknown — forwarded to get_match_form_analysis for round-name grounding.
+
+    Each triple is one LLM call reading articles for both teams simultaneously.
     Returns {team_name: FormAnalysis} for all teams across all pairs.
     """
     results: dict[str, FormAnalysis] = {}
-    for home, away in match_pairs:
-        pair_results = get_match_form_analysis(home, away, model=model)
+    for home, away, stage in match_pairs:
+        pair_results = get_match_form_analysis(home, away, model=model, stage=stage)
         results.update(pair_results)
     return results

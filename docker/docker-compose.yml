@@ -26,6 +26,10 @@ services:
       # Shared with trainer: trainer writes, scheduler only ever reads.
       - checkpoints:/app/checkpoints
       - training_data:/app/data/raw:ro
+      # llm_form_log.jsonl, odds/trajectory caches — scheduler is the only writer.
+      # Without this, every container run loses its cache writes on exit and the
+      # confidence-calibration log can't be analysed across runs.
+      - data_cache:/app/data/cache
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
@@ -61,3 +65,4 @@ volumes:
   ollama_models:
   checkpoints:
   training_data:
+  data_cache:

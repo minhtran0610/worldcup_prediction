@@ -35,6 +35,13 @@ from data.ingest.llm_form import (
 _ARTICLE_CACHE_PATH: Path = Path("data/cache/team_match_articles.json")
 _TRAJECTORY_CACHE_PATH: Path = Path("data/cache/team_trajectory.json")
 
+# Bump whenever the match-block format or trajectory prompt changes meaning —
+# folded into the tier-2 cache key so old entries self-invalidate instead of
+# silently masking the change behind a cache hit (bit us once: the stage-label
+# fix below changed what the LLM sees for a team whose match-date set was
+# unchanged, so the old key would have kept returning the pre-fix analysis).
+_TRAJECTORY_PROMPT_VERSION = 3
+
 
 def _match_key(team: str, opponent: str, match_date: pd.Timestamp) -> str:
     return f"{team}|{opponent}|{match_date.date().isoformat()}"
@@ -42,7 +49,7 @@ def _match_key(team: str, opponent: str, match_date: pd.Timestamp) -> str:
 
 def _trajectory_key(team: str, match_dates: list[pd.Timestamp]) -> str:
     dates_str = ",".join(sorted(d.date().isoformat() for d in match_dates))
-    return f"{team}|{dates_str}"
+    return f"v{_TRAJECTORY_PROMPT_VERSION}|{team}|{dates_str}"
 
 
 def _load_json_cache(path: Path) -> dict:
@@ -118,8 +125,13 @@ def get_team_trajectory(
     completed matches in team_matches, using a two-tier persistent cache.
 
     team_matches must have columns: date, home_team, away_team, home_score,
-    away_score (already filtered to matches involving `team`). Returns
-    FormAnalysis.neutral(team) immediately (no fetch/LLM call) if
+    away_score, stage (already filtered to matches involving `team`). `stage`
+    is the schedule's ground-truth round label (e.g. "Quarter-final",
+    "Semi-final") — it is injected verbatim into each match block header so
+    the LLM never has to infer the round from article prose, which is prone
+    to misreading journalist nicknames (e.g. a "bronze final" preview for the
+    third-place playoff getting misattributed to an earlier semi-final).
+    Returns FormAnalysis.neutral(team) immediately (no fetch/LLM call) if
     team_matches is empty.
 
     The tier-2 cache (this team's full match-date set) is checked first — a
@@ -183,7 +195,11 @@ def get_team_trajectory(
             has_any_article = True
 
         result = _describe_result(team, row.home_team, int(row.home_score), int(row.away_score))
-        header = f"=== Match {i} of {n} — vs {opponent} ({match_date.date()}), {team} {result} ==="
+        stage = getattr(row, "stage", None) or "round unknown"
+        header = (
+            f"=== Match {i} of {n} — vs {opponent} ({match_date.date()}), {stage}, "
+            f"{team} {result} ==="
+        )
         body = "\n\n".join(texts) if texts else "(no articles found for this match)"
         match_blocks.append(f"{header}\n{body}")
         all_urls.extend(urls)

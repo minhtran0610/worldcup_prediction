@@ -40,7 +40,7 @@ _TRAJECTORY_CACHE_PATH: Path = Path("data/cache/team_trajectory.json")
 # silently masking the change behind a cache hit (bit us once: the stage-label
 # fix below changed what the LLM sees for a team whose match-date set was
 # unchanged, so the old key would have kept returning the pre-fix analysis).
-_TRAJECTORY_PROMPT_VERSION = 3
+_TRAJECTORY_PROMPT_VERSION = 4
 
 
 def _match_key(team: str, opponent: str, match_date: pd.Timestamp) -> str:
